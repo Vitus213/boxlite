@@ -763,6 +763,13 @@ test('usage is exported to the ingest origin, never to the dashboard billing URL
   assert.doesNotMatch(environmentExample, /^USAGE_EXPORT_TOKEN=/m)
 })
 
+// Publishing is opt-in, so the stack must not turn it on for a stage that never configured
+// Commerce: the API refuses to boot when delivery is enabled without a URL and token. Usage
+// export derives its switch from the credential; this one has to read as an explicit 'false'.
+test('business event delivery stays off unless a stage turns it on', () => {
+  assert.match(liveConfig, /BUSINESS_EVENTS_ENABLED: envOr\('BUSINESS_EVENTS_ENABLED', 'false'\)/)
+})
+
 test('the Api sends through the SES identity this stack verifies', () => {
   // Three files have to agree before one invitation can leave the account, and each
   // pair of them can drift in silence: mail.ts derives the settings, api.ts consumes

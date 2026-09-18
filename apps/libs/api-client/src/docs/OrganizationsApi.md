@@ -1208,7 +1208,7 @@ const { status, data } = await apiInstance.listOrganizationRoles(
 [[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
 
 # **listOrganizations**
-> Array<Organization> listOrganizations()
+> Array<Organization> listOrganizations(options?)
 
 
 ### Example
@@ -1222,11 +1222,19 @@ import {
 const configuration = new Configuration();
 const apiInstance = new OrganizationsApi(configuration);
 
-const { status, data } = await apiInstance.listOrganizations();
+let referredCode: string; //Invitation link code for first registration; trim and uppercase, blank means ordinary registration. (optional) (default to undefined)
+
+const { status, data } = await apiInstance.listOrganizations(
+    { referredCode }
+);
 ```
 
 ### Parameters
-This endpoint does not have any parameters.
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **options** | **ListOrganizationsOptions** | Axios request options and optional invitation code. | (optional)|
+| **options.referredCode** | [**string**] | Invitation link code for first registration; trim and uppercase, blank means ordinary registration. | (optional) defaults to undefined|
 
 
 ### Return type
@@ -1247,6 +1255,12 @@ This endpoint does not have any parameters.
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
 |**200** | List of organizations |  -  |
+|**400** | invalid_referral_code |  -  |
+|**403** | email_verification_required |  -  |
+|**409** | registration_already_finalized |  -  |
+|**410** | registration_unavailable |  -  |
+|**422** | invitation_unavailable |  -  |
+|**503** | registration_busy |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
 

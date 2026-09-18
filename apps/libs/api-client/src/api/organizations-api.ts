@@ -65,6 +65,11 @@ import type { UpdateOrganizationName } from '../models';
 import type { UpdateOrganizationRole } from '../models';
 // @ts-ignore
 import type { UpdateRegion } from '../models';
+export type ListOrganizationsOptions = RawAxiosRequestConfig & {
+    /** Invitation link code for first registration; trim and uppercase, blank means ordinary registration. */
+    referredCode?: string;
+};
+
 /**
  * OrganizationsApi - axios parameter creator
  */
@@ -1014,10 +1019,13 @@ export const OrganizationsApiAxiosParamCreator = function (configuration?: Confi
         /**
          * 
          * @summary List organizations
-         * @param {*} [options] Override http request option.
+         * @param {ListOrganizationsOptions} [options] Request options, including the optional invitation code.
          * @throws {RequiredError}
          */
-        listOrganizations: async (options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+        listOrganizations: async ({ referredCode, ...options }: ListOrganizationsOptions = {}): Promise<RequestArgs> => {
+            if (referredCode !== undefined && typeof referredCode !== 'string') {
+                throw new TypeError('referredCode must be a string');
+            }
             const localVarPath = `/organizations`;
             // use dummy base URL string because the URL constructor only accepts absolute URLs.
             const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
@@ -1035,6 +1043,10 @@ export const OrganizationsApiAxiosParamCreator = function (configuration?: Confi
             await setBearerAuthToObject(localVarHeaderParameter, configuration)
 
             // authentication oauth2 required
+
+            if (referredCode !== undefined) {
+                localVarQueryParameter['referredCode'] = referredCode;
+            }
 
             localVarHeaderParameter['Accept'] = 'application/json';
 
@@ -1862,10 +1874,10 @@ export const OrganizationsApiFp = function(configuration?: Configuration) {
         /**
          * 
          * @summary List organizations
-         * @param {*} [options] Override http request option.
+         * @param {ListOrganizationsOptions} [options] Request options, including the optional invitation code.
          * @throws {RequiredError}
          */
-        async listOrganizations(options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<Array<Organization>>> {
+        async listOrganizations(options?: ListOrganizationsOptions): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<Array<Organization>>> {
             const localVarAxiosArgs = await localVarAxiosParamCreator.listOrganizations(options);
             const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
             const localVarOperationServerBasePath = operationServerMap['OrganizationsApi.listOrganizations']?.[localVarOperationServerIndex]?.url;
@@ -2277,10 +2289,10 @@ export const OrganizationsApiFactory = function (configuration?: Configuration, 
         /**
          * 
          * @summary List organizations
-         * @param {*} [options] Override http request option.
+         * @param {ListOrganizationsOptions} [options] Request options, including the optional invitation code.
          * @throws {RequiredError}
          */
-        listOrganizations(options?: RawAxiosRequestConfig): AxiosPromise<Array<Organization>> {
+        listOrganizations(options?: ListOrganizationsOptions): AxiosPromise<Array<Organization>> {
             return localVarFp.listOrganizations(options).then((request) => request(axios, basePath));
         },
         /**
@@ -2677,10 +2689,10 @@ export class OrganizationsApi extends BaseAPI {
     /**
      * 
      * @summary List organizations
-     * @param {*} [options] Override http request option.
+     * @param {ListOrganizationsOptions} [options] Request options, including the optional invitation code.
      * @throws {RequiredError}
      */
-    public listOrganizations(options?: RawAxiosRequestConfig) {
+    public listOrganizations(options?: ListOrganizationsOptions) {
         return OrganizationsApiFp(this.configuration).listOrganizations(options).then((request) => request(this.axios, this.basePath));
     }
 

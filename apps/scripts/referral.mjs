@@ -131,6 +131,9 @@ const jest = [
   '--outputFile',
   path.join(runDirectory, mode + '.json'),
 ]
+const integrationJest = jest.map((argument) =>
+  argument === 'api/jest.config.ts' ? 'api/jest.referral.config.ts' : argument,
+)
 let succeeded = false
 try {
   switch (mode) {
@@ -151,6 +154,9 @@ try {
         '(auth/(jwt.strategy|combined-auth.guard)|user/user.service.default-organization-compat|organization/(controllers/organization.controller|services/organization.service))\\.spec\\.ts$',
       ])
       break
+    case 'integration':
+      await run('yarn', [...integrationJest, '--testPathPatterns', 'referral.integration.spec.ts'])
+      break
     case 'dashboard':
       await run('yarn', [
         'vitest',
@@ -163,6 +169,9 @@ try {
         '--reporter=json',
         '--outputFile=' + path.join(runDirectory, 'dashboard.json'),
       ])
+      break
+    case 'acceptance':
+      await run('yarn', [...integrationJest, '--testPathPatterns', 'referral.acceptance.spec.ts'])
       break
     case 'generate':
       await generateClients()
