@@ -172,7 +172,8 @@ impl LiteBox {
     ///
     /// `source` is the archive shape (directory tree vs single file);
     /// [`CopySourceKind::Unknown`] when the caller cannot tell — the receiver
-    /// then peeks the archive to decide. Every backend supports this.
+    /// then peeks the archive to decide.
+    ///
     /// Failure may leave partial files and directories, including earlier
     /// overwrites; their contents, ownership and permissions are not rolled back
     /// or guaranteed to be finalized.
