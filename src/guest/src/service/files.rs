@@ -1245,6 +1245,7 @@ mod upload_tests {
             }
         }
 
+        #[allow(clippy::result_large_err)]
         async fn upload(
             &mut self,
             entries: &[(&str, &[u8])],
