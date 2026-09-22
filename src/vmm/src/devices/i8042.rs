@@ -13,10 +13,14 @@
 //! future `Vm::run` poller watches that flag and drives the stop protocol
 //! (design, "Stopping"). The device never exits the process itself.
 //!
-//! Everything else the driver probes must answer, or kernel probing stalls:
-//! a status register whose bits track the controller buffers, the control
-//! register commands, and an ACK (`0xFA`) for anything sent to the
-//! keyboard. Behavior cross-checked against libkrun/Firecracker's
+//! Everything else the driver probes must answer, or kernel probing stalls.
+//! The two ports have strictly separate command spaces: the controller's
+//! own commands arrive on 0x64, while keyboard commands the guest writes to
+//! 0x60 pass through to the attached device, which answers there. Linux's
+//! `i8042` and `atkbd` drivers use exactly that split, and their send loop
+//! waits for Input-Buffer-Full to stay clear before writing — so this
+//! emulation, which consumes every byte synchronously, always reports the
+//! input buffer empty. Behavior cross-checked against libkrun/Firecracker's
 //! `devices/legacy/i8042` (e12b9b3 / 68698ad), including their five-port
 //! window registration at `0x60` that carries the two ports the device
 //! separates by offset.
@@ -33,37 +37,37 @@ use crate::bus::BusDevice;
 
 /// Output-buffer-full: the guest must read port 0x60 before more responses.
 const STATUS_OUT_DATA: u8 = 0x01;
-/// Input-buffer-full: the controller waits for a parameter byte on 0x60.
-const STATUS_IN_DATA: u8 = 0x02;
 /// Self-test passed: the BIOS post always ran fine in a VM.
 const STATUS_SELF_TEST_OK: u8 = 0x04;
 
-// Controller commands written to port 0x64.
+// Controller commands written to port 0x64. Only the two-step commands take
+// a parameter, which arrives on the data port.
 const CMD_READ_CONTROL: u8 = 0x20;
 const CMD_WRITE_CONTROL: u8 = 0x60;
-const CMD_DISABLE_FIRST_PORT: u8 = 0xAD;
-const CMD_ENABLE_FIRST_PORT: u8 = 0xAE;
 const CMD_DISABLE_SECOND_PORT: u8 = 0xA7;
 const CMD_ENABLE_SECOND_PORT: u8 = 0xA8;
+const CMD_DISABLE_FIRST_PORT: u8 = 0xAD;
+const CMD_ENABLE_FIRST_PORT: u8 = 0xAE;
+const CMD_SELF_TEST: u8 = 0xAA;
 const CMD_READ_OUTPUT_PORT: u8 = 0xD0;
 const CMD_WRITE_OUTPUT_PORT: u8 = 0xD1;
-const CMD_SET_LED_FOLLOWED_BY_DATA: u8 = 0xED;
-const CMD_SELF_TEST: u8 = 0xAA;
-const CMD_PULSE_TEST: u8 = 0xEE;
-const CMD_READ_ID: u8 = 0xF2;
-const CMD_SET_DEFAULTS: u8 = 0xF0;
 const CMD_RESET_CPU: u8 = 0xFE;
-const CMD_RETEST: u8 = 0xFF;
+
+// Keyboard commands the guest writes to port 0x60; the controller forwards
+// them to the attached device, which answers on the same port.
+const KBD_SET_LED: u8 = 0xED; // followed by one LED byte
+const KBD_SET_DEFAULTS: u8 = 0xF0;
+const KBD_READ_ID: u8 = 0xF2;
+const KBD_ENABLE: u8 = 0xF4;
+const KBD_RETEST: u8 = 0xFF;
 
 // Control register bits this emulation keeps.
 const CONTROL_FIRST_PORT_ENABLED: u8 = 0x10;
 const CONTROL_SECOND_PORT_ENABLED: u8 = 0x20;
 
-/// Commands whose next byte arrives on the data port.
+/// Controller commands whose parameter byte arrives on the data port.
 #[derive(PartialEq, Eq)]
 enum Expect {
-    /// 0xED: the payload sets the keyboard LEDs; we have none.
-    SetLed,
     /// 0x60: the payload is the controller's new control register.
     ControlByte,
     /// 0xD1: the payload drives the output port latch.
@@ -81,7 +85,7 @@ pub struct I8042 {
     /// The output latch, readable via 0xD0.
     output_port: u8,
     expect: Option<Expect>,
-    /// Controller-to-host responses, drained one byte per 0x60 read.
+    /// Host-visible responses, drained one byte per 0x60 read.
     resp: VecDeque<u8>,
 }
 
@@ -110,12 +114,13 @@ impl I8042 {
     }
 
     fn read_status(&mut self) -> u8 {
+        // Input-buffer-full (bit 1) always reads clear: the emulation
+        // consumes every byte synchronously, so the driver's wait for a
+        // writable controller before a two-step command's parameter — and
+        // before every keyboard write — never times out.
         let mut status = STATUS_SELF_TEST_OK;
         if !self.resp.is_empty() {
             status |= STATUS_OUT_DATA;
-        }
-        if self.expect.is_some() {
-            status |= STATUS_IN_DATA;
         }
         status
     }
@@ -138,24 +143,34 @@ impl I8042 {
             CMD_SELF_TEST => self.push(&[0x55]), // the pass code the probe awaits
             CMD_READ_OUTPUT_PORT => self.push(&[self.output_port]),
             CMD_WRITE_OUTPUT_PORT => self.expect = Some(Expect::OutputPort),
-            CMD_SET_LED_FOLLOWED_BY_DATA => self.expect = Some(Expect::SetLed),
-            CMD_PULSE_TEST => self.push(&[CMD_PULSE_TEST]), // echo: loopback OK
-            // The attached device is a standard scancode-set-2 keyboard.
-            CMD_READ_ID => self.push(&[0xFA, 0xAB, 0x00]),
-            CMD_SET_DEFAULTS | CMD_RETEST => self.push(&[0xFA, 0x00]),
+            // Deliberate leniency: acknowledge an unknown controller
+            // command so a probe cannot stall the guest on it.
             _ => self.push(&[0xFA]),
         }
     }
 
     fn write_data(&mut self, value: u8) {
-        match self.expect.take() {
-            Some(Expect::ControlByte) => self.command = value,
-            Some(Expect::OutputPort) => self.output_port = value,
-            // LEDs: there is no physical keyboard, so swallow the parameter.
-            Some(Expect::SetLed) => {}
-            // An unrequested byte on the data port is a command to the
-            // keyboard device; blindly ACK it, as libkrun's emulation does.
-            None => self.push(&[0xFA]),
+        if let Some(expect) = self.expect.take() {
+            // The byte is a pending two-step command's parameter.
+            match expect {
+                Expect::ControlByte => self.command = value,
+                Expect::OutputPort => self.output_port = value,
+            }
+            return;
+        }
+        // Otherwise the controller forwards it to the attached keyboard,
+        // a standard scancode-set-2 device. Replies replace the queue as
+        // for any controller response.
+        match value {
+            KBD_READ_ID => self.push(&[0xFA, 0xAB, 0x00]),
+            KBD_SET_DEFAULTS | KBD_RETEST => self.push(&[0xFA, 0x00]),
+            // LEDs and enable/disable ack; the one-byte parameter of 0xED
+            // and 0xF3 arrives as a bare write and is swallowed below.
+            KBD_SET_LED | KBD_ENABLE => self.push(&[0xFA]),
+            // Deliberate leniency: acknowledge anything else (scan-code
+            // echo, rescan, a command's leftover parameter) so a driver
+            // probe can never stall the guest.
+            _ => self.push(&[0xFA]),
         }
     }
 }
@@ -231,7 +246,7 @@ mod tests {
         let (mut dev, _) = controller();
         // Fresh controller: self-test OK, no pending byte.
         assert_eq!(read_status(&mut dev), STATUS_SELF_TEST_OK);
-        write_command(&mut dev, CMD_READ_ID);
+        write_data(&mut dev, KBD_READ_ID);
         assert_eq!(read_status(&mut dev) & STATUS_OUT_DATA, STATUS_OUT_DATA);
         assert_eq!(read_data(&mut dev), 0xFA);
         assert_eq!(read_data(&mut dev), 0xAB);
@@ -240,6 +255,50 @@ mod tests {
         assert_eq!(read_status(&mut dev) & STATUS_OUT_DATA, 0);
         // Reading past the end answers zero, never a panic.
         assert_eq!(read_data(&mut dev), 0);
+    }
+
+    #[test]
+    fn input_buffer_is_always_writable() {
+        // The driver's protocol: after a command byte it waits for
+        // IBF == 0 before writing the parameter. A synchronous emulation
+        // must never hold it high — not even between a two-step command
+        // and its parameter.
+        let (mut dev, _) = controller();
+        write_command(&mut dev, CMD_WRITE_CONTROL);
+        assert_eq!(read_status(&mut dev) & 0x02, 0);
+        write_data(&mut dev, 0x47);
+        assert_eq!(read_status(&mut dev) & 0x02, 0);
+    }
+
+    #[test]
+    fn keyboard_commands_answer_on_the_data_port() {
+        let (mut dev, _) = controller();
+        // atkbd probe: GETID on port 0x60 expects FA AB 00.
+        write_data(&mut dev, KBD_READ_ID);
+        assert_eq!(read_data(&mut dev), 0xFA);
+        assert_eq!(read_data(&mut dev), 0xAB);
+        assert_eq!(read_data(&mut dev), 0x00);
+        // SET_DEFAULTS and RETEST answer FA 00.
+        write_data(&mut dev, KBD_SET_DEFAULTS);
+        assert_eq!(read_data(&mut dev), 0xFA);
+        assert_eq!(read_data(&mut dev), 0x00);
+        // SET_LED (0xED) acks and swallows its parameter byte.
+        write_data(&mut dev, KBD_SET_LED);
+        assert_eq!(read_data(&mut dev), 0xFA);
+        write_data(&mut dev, 0x00); // the LED payload
+        assert_eq!(read_data(&mut dev), 0xFA); // payload acked, queue stays sane
+        // An unrequested command-to-the-device byte also acks.
+        write_data(&mut dev, 0xEE); // echo
+        assert_eq!(read_data(&mut dev), 0xFA);
+    }
+
+    #[test]
+    fn write_control_is_a_two_step_command() {
+        let (mut dev, _) = controller();
+        write_command(&mut dev, CMD_WRITE_CONTROL);
+        write_data(&mut dev, 0x43);
+        write_command(&mut dev, CMD_READ_CONTROL);
+        assert_eq!(read_data(&mut dev), 0x43);
     }
 
     #[test]
@@ -261,53 +320,12 @@ mod tests {
     }
 
     #[test]
-    fn write_control_is_a_two_step_command() {
+    fn controller_commands_reply_on_the_data_port() {
         let (mut dev, _) = controller();
-        write_command(&mut dev, CMD_WRITE_CONTROL);
-        // Status shows the controller waiting for a parameter byte.
-        assert_eq!(read_status(&mut dev) & STATUS_IN_DATA, STATUS_IN_DATA);
-        write_data(&mut dev, 0x43);
-        assert_eq!(read_status(&mut dev) & STATUS_IN_DATA, 0);
-        write_command(&mut dev, CMD_READ_CONTROL);
-        assert_eq!(read_data(&mut dev), 0x43);
-    }
-
-    #[test]
-    fn led_command_consumes_its_parameter_silently() {
-        let (mut dev, _) = controller();
-        write_command(&mut dev, CMD_SET_LED_FOLLOWED_BY_DATA);
-        assert_eq!(read_status(&mut dev) & STATUS_IN_DATA, STATUS_IN_DATA);
-        write_data(&mut dev, 0x01);
-        assert_eq!(read_status(&mut dev) & STATUS_IN_DATA, 0); // parameter consumed
-        assert_eq!(read_status(&mut dev) & STATUS_OUT_DATA, 0); // no reply queued
-    }
-
-    #[test]
-    fn echo_and_default_replies() {
-        let (mut dev, _) = controller();
-        write_command(&mut dev, CMD_PULSE_TEST);
-        assert_eq!(read_data(&mut dev), 0xEE);
-        write_command(&mut dev, CMD_SET_DEFAULTS);
-        assert_eq!(read_data(&mut dev), 0xFA);
+        write_command(&mut dev, CMD_SELF_TEST);
+        assert_eq!(read_data(&mut dev), 0x55);
+        write_command(&mut dev, CMD_READ_OUTPUT_PORT);
         assert_eq!(read_data(&mut dev), 0x00);
-        write_command(&mut dev, CMD_RETEST);
-        assert_eq!(read_data(&mut dev), 0xFA);
-        assert_eq!(read_data(&mut dev), 0x00);
-    }
-
-    #[test]
-    fn unknown_command_and_bare_keyboard_writes_always_ack() {
-        let (mut dev, _) = controller();
-        write_command(&mut dev, 0xF1); // unsupported controller command
-        assert_eq!(read_data(&mut dev), 0xFA);
-        // Direct keyboard command with nothing pending: ACK.
-        write_data(&mut dev, 0xFF);
-        assert_eq!(read_data(&mut dev), 0xFA);
-    }
-
-    #[test]
-    fn output_port_round_trips() {
-        let (mut dev, _) = controller();
         write_command(&mut dev, CMD_WRITE_OUTPUT_PORT);
         write_data(&mut dev, 0xA2);
         write_command(&mut dev, CMD_READ_OUTPUT_PORT);
@@ -315,9 +333,17 @@ mod tests {
     }
 
     #[test]
+    fn unknown_controller_commands_ack() {
+        let (mut dev, _) = controller();
+        write_command(&mut dev, 0xF1); // was a keyboard command in error;
+        // on the controller port it is unknown
+        assert_eq!(read_data(&mut dev), 0xFA);
+    }
+
+    #[test]
     fn wide_access_walks_ports_without_panic() {
         let (mut dev, _) = controller();
-        write_command(&mut dev, CMD_READ_ID);
+        write_data(&mut dev, KBD_READ_ID);
         // A wide access visits distinct ports: only offset 0 pops the data
         // queue, offsets 1..3 are unclaimed, offset 4 is the status port.
         let mut data = [0u8; 5];
@@ -327,7 +353,7 @@ mod tests {
         assert_eq!(data[4] & STATUS_OUT_DATA, STATUS_OUT_DATA); // AB, 00 queued
         assert_eq!(read_data(&mut dev), 0xAB);
         assert_eq!(read_data(&mut dev), 0x00);
-        // A write walk that crosses both ports: ACK replies, never a panic.
+        // A write walk that crosses both ports: replies, never a panic.
         dev.write(0, &[0x00; 8]);
         assert_eq!(read_status(&mut dev) & STATUS_OUT_DATA, STATUS_OUT_DATA);
     }

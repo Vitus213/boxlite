@@ -151,8 +151,9 @@ mod tests {
     fn kernel_probe_walks_the_legacy_port_bus() {
         let m = machine();
 
-        // 1. Console probe: LSR shows transmitter empty, no RX, no errors.
-        assert_eq!(m.read(0x3FD), 0x70);
+        // 1. Console probe: LSR shows transmitter empty, no RX, no errors,
+        //    and no break (bit 4 must stay clear or the guest drops input).
+        assert_eq!(m.read(0x3FD), 0x60);
 
         // 2. 16550A init: DLAB, divisor 12 (9600 baud), 8N1, FIFO on, RX IRQ,
         //    OUT2 armed.

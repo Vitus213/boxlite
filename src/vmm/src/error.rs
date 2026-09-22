@@ -23,6 +23,14 @@ pub enum Error {
         /// Size of the rejected window.
         size: u64,
     },
+    /// A device window that is not addressable: its range ends outside the
+    /// address space, so dispatch could never cover it soundly.
+    InvalidWindow {
+        /// Base address or port of the rejected window.
+        base: u64,
+        /// Size of the rejected window.
+        size: u64,
+    },
     /// A guest access hit an address with no device behind it.
     Unmapped {
         /// Faulting guest physical address.
@@ -54,6 +62,12 @@ impl fmt::Display for Error {
             Self::Overlap { base, size } => {
                 write!(f, "device at {base:#x}+{size} overlaps an existing device")
             }
+            Self::InvalidWindow { base, size } => {
+                write!(
+                    f,
+                    "device window {base:#x}+{size} does not fit the address space"
+                )
+            }
             Self::Unmapped { addr } => write!(f, "no device at guest address {addr:#x}"),
             Self::IoOverlap { port, size } => write!(
                 f,
@@ -72,6 +86,7 @@ impl error::Error for Error {
             // The bus variants name their resource in Display and carry no
             // host cause.
             Self::Overlap { .. }
+            | Self::InvalidWindow { .. }
             | Self::Unmapped { .. }
             | Self::IoOverlap { .. }
             | Self::IoUnmapped { .. }

@@ -40,10 +40,14 @@ pub trait BusDevice: Send {
 type Window = (u64, Arc<Mutex<dyn BusDevice + Send>>);
 
 /// Returns whether `[start, start + len)` overlaps `[other_start, other_start + other_len)`.
-/// Adjacency (one range ending where the other starts) is not an overlap.
-/// Saturating ends keep a builder registering a high window from panicking.
+///
+/// Both ends are exact: `insert` rejects any window whose range would
+/// overflow the address space, so every stored end — and every start or
+/// size a caller may pass in under that same rule — is representable and
+/// plain addition never wraps. Adjacency (one range ending where the other
+/// starts) is not an overlap.
 fn overlaps(start: u64, len: u64, other_start: u64, other_len: u64) -> bool {
-    start < other_start.saturating_add(other_len) && other_start < start.saturating_add(len)
+    start < other_start + other_len && other_start < start + len
 }
 
 /// The MMIO bus: guest physical address ranges mapped to devices.
@@ -66,19 +70,22 @@ impl Bus {
 
     /// Registers `device` for `[base, base + size)`.
     ///
-    /// Fails with [`Error::Overlap`] if `size` is zero or the range touches
-    /// a registered window.
+    /// Fails with [`Error::InvalidWindow`] if `size` is zero or the range
+    /// would run past the end of the address space, and with
+    /// [`Error::Overlap`] if the range touches a registered window.
     pub fn insert(
         &mut self,
         base: u64,
         size: u64,
         device: Arc<Mutex<dyn BusDevice + Send>>,
     ) -> Result<()> {
-        if size == 0
-            || self
-                .ranges
-                .iter()
-                .any(|(old_base, (old_size, _))| overlaps(base, size, *old_base, *old_size))
+        if size == 0 || base.checked_add(size).is_none() {
+            return Err(Error::InvalidWindow { base, size });
+        }
+        if self
+            .ranges
+            .iter()
+            .any(|(old_base, (old_size, _))| overlaps(base, size, *old_base, *old_size))
         {
             return Err(Error::Overlap { base, size });
         }
@@ -149,10 +156,12 @@ impl IoBus {
 
     /// Registers `device` for ports `[base, base + size)`.
     ///
-    /// Fails with [`Error::IoOverlap`] on a zero size or a range that
-    /// touches a registered window; adjacency is allowed, as on [`Bus`].
-    /// One device may own several windows by registering the same `Arc`
-    /// once per window, which is how the i8042 spans non-adjacent ports.
+    /// Fails with [`Error::InvalidWindow`] on a zero size or a range that
+    /// runs past the end of the 16-bit port space, and with
+    /// [`Error::IoOverlap`] if the range touches a registered window;
+    /// adjacency is allowed, as on [`Bus`]. One device may own several
+    /// windows by registering the same `Arc` once per window, which is how
+    /// the i8042 spans non-adjacent ports.
     pub fn insert(
         &mut self,
         base: u16,
@@ -160,17 +169,20 @@ impl IoBus {
         device: Arc<Mutex<dyn BusDevice + Send>>,
     ) -> Result<()> {
         let wide = u64::from(size);
-        if size == 0
-            || self.ranges.iter().any(|(old_base, (old_size, _))| {
-                overlaps(u64::from(base), wide, u64::from(*old_base), *old_size)
-            })
-        {
+        if size == 0 || u64::from(base) + wide > 0x1_0000 {
+            return Err(Error::InvalidWindow {
+                base: u64::from(base),
+                size: wide,
+            });
+        }
+        if self.ranges.iter().any(|(old_base, (old_size, _))| {
+            overlaps(u64::from(base), wide, u64::from(*old_base), *old_size)
+        }) {
             return Err(Error::IoOverlap { port: base, size });
         }
         self.ranges.insert(base, (wide, device));
         Ok(())
     }
-
     /// Dispatches a guest read from `port` to its device.
     pub fn read(&self, port: u16, data: &mut [u8]) -> Result<()> {
         let (base, device) = self.window(port, data.len() as u64)?;
@@ -194,7 +206,10 @@ impl IoBus {
     /// Finds the window whose ports fully contain `[port, port + len)`.
     ///
     /// As on [`Bus::window`], the greatest base at or below `port` is the
-    /// only candidate because windows never overlap.
+    /// only candidate because windows never overlap. Plain addition is
+    /// exact: `insert` confines stored ends to the 16-bit port space plus
+    /// one, and an access buffer cannot be long enough to wrap the `u64`
+    /// sum.
     fn window(&self, port: u16, len: u64) -> Result<(u64, &Arc<Mutex<dyn BusDevice + Send>>)> {
         let end = u64::from(port) + len;
         let (base, (size, device)) = self
@@ -234,14 +249,27 @@ mod tests {
     }
 
     #[test]
-    fn insert_rejects_zero_size() {
+    fn insert_rejects_invalid_windows() {
         let mut bus = Bus::new();
         assert!(matches!(
             bus.insert(0x1000, 0, device()),
-            Err(Error::Overlap {
+            Err(Error::InvalidWindow {
                 base: 0x1000,
                 size: 0
             })
+        ));
+        // A window that runs past the end of the address space would defeat
+        // exact overlap and containment arithmetic: rejected at the boundary.
+        assert!(matches!(
+            bus.insert(u64::MAX, 2, device()),
+            Err(Error::InvalidWindow { .. })
+        ));
+        // And a re-registration at the same base is still an Overlap, not a
+        // silent replacement.
+        bus.insert(0x2000, 0x1000, device()).unwrap();
+        assert!(matches!(
+            bus.insert(0x2000, 0x1000, device()),
+            Err(Error::Overlap { .. })
         ));
     }
 

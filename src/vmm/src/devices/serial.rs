@@ -37,7 +37,13 @@ const FCR_RX_RST: u8 = 0x02;
 const FCR_TX_RST: u8 = 0x04;
 /// FIFO-control bit 4: loopback mode, the same gate as MCR bit 4.
 const FCR_LOOP: u8 = 0x10;
-/// Modem-control: the driver's "interrupts may fire" bit.
+/// Modem-control: data terminal ready, ring through loopback to DSR.
+const MCR_DTR: u8 = 0x01;
+/// Modem-control: request to send, ring through loopback to CTS.
+const MCR_RTS: u8 = 0x02;
+/// Modem-control: auxiliary output 1, ring through loopback to RI.
+const MCR_OUT1: u8 = 0x04;
+/// Modem-control: the driver's "interrupts may fire" bit, loopback to DCD.
 const MCR_OUT2: u8 = 0x08;
 /// Modem-control: internal loopback, RX wired to TX.
 const MCR_LOOP: u8 = 0x10;
@@ -49,11 +55,12 @@ const IIR_RECEIVED_DATA: u8 = 0x04;
 // Line status bits the guest polls.
 const LSR_DATA_READY: u8 = 0x01;
 const LSR_OVERRUN: u8 = 0x02;
-/// Idle line: bits 4 (interrupt pending status), 5 (holding register empty)
-/// and 6 (transmitter completely empty). This device absorbs every write
-/// into its sink, so 5 and 6 are always set; 4 is set so drivers' loopback
-/// self-test proceeds. An idle LSR is therefore 0x70.
-const LSR_IDLE: u8 = 0x70;
+/// Idle line: bit 5 (holding register empty) and bit 6 (transmitter
+/// completely empty). This device absorbs every write into its sink, so
+/// both are always set. Bit 4 is the break indicator: setting it would
+/// make the guest treat every received character as a break. An idle LSR
+/// is therefore 0x60, as in Firecracker and crosvm.
+const LSR_IDLE: u8 = 0x60;
 
 /// An emulated 16550A serial port.
 ///
@@ -204,15 +211,22 @@ impl Serial {
                 }
                 lsr
             }
-            // Loopback reflects OUT2 into CTS and OUT1 into DSR; with no
-            // modem attached, everything else is 0.
+            // In loopback the part rings the control lines into the modem
+            // status inputs: RTS→CTS, DTR→DSR, OUT1→RI, OUT2→DCD. Linux's
+            // autoconfig writes MCR 0x1A and expects MSR & 0xF0 == 0x90.
             6 if self.loopback() => {
                 let mut msr = 0u8;
-                if (self.mcr & MCR_OUT2) != 0 {
+                if (self.mcr & MCR_RTS) != 0 {
                     msr |= 0x10; // CTS
                 }
-                if (self.mcr & 0x02) != 0 {
+                if (self.mcr & MCR_DTR) != 0 {
                     msr |= 0x20; // DSR
+                }
+                if (self.mcr & MCR_OUT1) != 0 {
+                    msr |= 0x40; // RI
+                }
+                if (self.mcr & MCR_OUT2) != 0 {
+                    msr |= 0x80; // DCD
                 }
                 msr
             }
@@ -473,11 +487,14 @@ mod tests {
         assert!(port.sink.0.lock().unwrap().is_empty());
         assert_eq!(port.read(0), b'z');
         // Loopback MSR reflects the control lines.
+        // The datasheet mapping: RTS→CTS, DTR→DSR, OUT1→RI, OUT2→DCD.
+        port.write(4, MCR_LOOP | MCR_RTS);
+        assert_eq!(port.read(6), 0x10); // CTS only
         port.write(4, MCR_LOOP | MCR_OUT2);
-        assert_eq!(port.read(6) & 0x10, 0x10); // CTS follows OUT2
-        assert_eq!(port.read(6) & 0x20, 0); // DSR follows OUT1, unset
-        port.write(4, MCR_LOOP | 0x02);
-        assert_eq!(port.read(6) & 0x20, 0x20);
+        assert_eq!(port.read(6), 0x80); // DCD only
+        // Linux autoconfig's probe byte: MCR 0x1A expects MSR & 0xF0 == 0x90.
+        port.write(4, 0x1A | MCR_LOOP);
+        assert_eq!(port.read(6) & 0xF0, 0x90);
     }
 
     #[test]
