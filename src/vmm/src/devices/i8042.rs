@@ -18,14 +18,16 @@
 //! own commands arrive on 0x64, while keyboard commands the guest writes to
 //! 0x60 pass through to the attached device, which answers there — and the
 //! device keeps its own one-deep parameter state (`F0`, `ED`, `F3` wait for
-//! a follow-up byte). Linux's `i8042` and `atkbd` drivers use exactly that
-//! split, and their send loop waits for Input-Buffer-Full to stay clear
-//! before writing — so this emulation, which consumes every byte
-//! synchronously, always reports the input buffer empty. Behavior
-//! cross-checked against libkrun/Firecracker's `devices/legacy/i8042`
-//! (e12b9b3 / 68698ad), the AT keyboard command set, and the standard
-//! five-port window registration at `0x60` that carries the two ports the
-//! device separates by offset.
+//! a follow-up byte). The controller's translation bit (command byte bit 1)
+//! selects whether the keyboard's scan-set query answers with translated
+//! codes (43/41/3F) or the raw set number, which is what Linux's `atkbd`
+//! branches on. Linux's `i8042` and `atkbd` drivers also wait for
+//! Input-Buffer-Full to stay clear before writing — so this emulation,
+//! which consumes every byte synchronously, always reports the input
+//! buffer empty. Behavior cross-checked against libkrun/Firecracker's
+//! `devices/legacy/i8042` (e12b9b3 / 68698ad), QEMU's `hw/input/ps2.c`,
+//! the AT keyboard command set, and the standard five-port window
+//! registration at `0x60` that carries the two ports by offset.
 
 use std::{
     collections::VecDeque,
@@ -57,13 +59,15 @@ const CMD_RESET_CPU: u8 = 0xFE;
 
 // Keyboard commands the guest writes to port 0x60; the controller forwards
 // them to the attached device, which answers on the same port.
-const KBD_ECHO: u8 = 0xEE;
 const KBD_SET_LED: u8 = 0xED; // parameter: LED state
+const KBD_ECHO: u8 = 0xEE;
 const KBD_SET_SCANSET: u8 = 0xF0; // parameter: set 1–3, or 0 to query
 const KBD_READ_ID: u8 = 0xF2;
 const KBD_SET_REPEAT: u8 = 0xF3; // parameter: repeat rate/delay
-const KBD_RESEND: u8 = 0xFE;
-const KBD_RESET: u8 = 0xFF; // the BAT pass code follows the ack
+const KBD_RESET_DISABLE: u8 = 0xF5; // defaults (set 2), then stop scanning
+const KBD_RESET_DEFAULTS: u8 = 0xF6; // defaults (set 2)
+const KBD_RESEND: u8 = 0xFE; // repeat the last byte sent to the host
+const KBD_RESET: u8 = 0xFF; // defaults (set 2); BAT follows the ack
 
 // Replies. The controller self-test answers 0x55 (i8042 datasheet); the
 // keyboard's built-in assurance test answers 0xAA after its ack.
@@ -71,9 +75,10 @@ const KBD_ACK: u8 = 0xFA;
 const CONTROLLER_TEST_PASS: u8 = 0x55;
 const KBD_BAT_PASS: u8 = 0xAA;
 
-/// Query answers for `F0 00`, the translated set codes the AT command set
-/// documents (set 1 → 43, set 2 → 41, set 3 → 3F). Linux's `atkbd`
-/// `GSCANSET` reads exactly one of these after the second ack.
+/// The translated answers to a `F0 00` query when the controller's
+/// translation is on, per the AT command set (set 1 → 43, 2 → 41, 3 → 3F).
+/// With translation off the raw set number answers instead, and `atkbd`
+/// parses the two forms differently.
 const fn scanset_code(set: u8) -> u8 {
     match set {
         1 => 0x43,
@@ -83,6 +88,7 @@ const fn scanset_code(set: u8) -> u8 {
 }
 
 // Control register bits this emulation keeps.
+const CONTROL_TRANSLATION: u8 = 0x02; // hardware bit 1; BIOS boots it set
 const CONTROL_FIRST_PORT_ENABLED: u8 = 0x10;
 const CONTROL_SECOND_PORT_ENABLED: u8 = 0x20;
 
@@ -99,7 +105,7 @@ enum Expect {
 #[derive(PartialEq, Eq)]
 enum KbdExpect {
     /// `F0`: the payload selects a scan-code set, or 0 queries the current
-    /// one, which answers with the set's code after the ack.
+    /// one, which answers (translated or raw) after the ack.
     ScanSet,
     /// `ED`/`F3`: the payload configures LEDs or repeat timing; we have
     /// neither device, so it is swallowed behind an ack.
@@ -120,8 +126,12 @@ pub struct I8042 {
     kbd_expect: Option<KbdExpect>,
     /// The attached keyboard's scan-code set; PS/2 keyboards boot in set 2.
     scan_set: u8,
-    /// Host-visible responses, drained one byte per 0x60 read.
-    resp: VecDeque<u8>,
+    /// Host-visible replies, drained one byte per 0x60 read. Each byte
+    /// remembers whether it came from the keyboard, so `FE` resend re-sends
+    /// only keyboard traffic.
+    resp: VecDeque<(u8, bool)>,
+    /// The last keyboard byte the host read; what `FE` re-queues.
+    last_kbd_sent: Option<u8>,
 }
 
 impl I8042 {
@@ -134,22 +144,34 @@ impl I8042 {
     pub fn new(reset_requested: Arc<AtomicBool>) -> Self {
         Self {
             reset: reset_requested,
-            // POST passed, both ports enabled: what a clean-booting PC reports.
-            command: CONTROL_FIRST_PORT_ENABLED | CONTROL_SECOND_PORT_ENABLED,
+            // POST passed, both ports enabled, translation on: what a
+            // clean-booting PC reports.
+            command: CONTROL_TRANSLATION | CONTROL_FIRST_PORT_ENABLED | CONTROL_SECOND_PORT_ENABLED,
             output_port: 0,
             expect: None,
             kbd_expect: None,
             scan_set: 2,
             resp: VecDeque::new(),
+            last_kbd_sent: None,
         }
     }
 
-    /// Queues a reply, replacing anything the driver never read. Drivers
-    /// wait for the previous reply's bytes before writing again, so the
-    /// queue is empty here in every probe sequence.
+    /// Queues a controller reply, replacing anything the driver never read.
     fn push(&mut self, bytes: &[u8]) {
+        self.replace_reply(bytes, false);
+    }
+
+    /// Queues a keyboard reply.
+    fn push_kbd(&mut self, bytes: &[u8]) {
+        self.replace_reply(bytes, true);
+    }
+
+    /// Drivers wait for the previous reply's bytes before writing again, so
+    /// the queue is empty at every push in a well-behaved probe sequence;
+    /// replacing it is safe for the bytes a buggy driver left unread.
+    fn replace_reply(&mut self, bytes: &[u8], keyboard: bool) {
         self.resp.clear();
-        self.resp.extend(bytes);
+        self.resp.extend(bytes.iter().map(|b| (*b, keyboard)));
     }
 
     fn read_status(&mut self) -> u8 {
@@ -165,7 +187,14 @@ impl I8042 {
     }
 
     fn read_data(&mut self) -> u8 {
-        self.resp.pop_front().unwrap_or(0)
+        match self.resp.pop_front() {
+            Some((byte, true)) => {
+                self.last_kbd_sent = Some(byte);
+                byte
+            }
+            Some((byte, false)) => byte,
+            None => 0,
+        }
     }
 
     fn write_command(&mut self, value: u8) {
@@ -200,17 +229,25 @@ impl I8042 {
         if let Some(kbd_expect) = self.kbd_expect.take() {
             // The byte is the pending keyboard command's parameter.
             match kbd_expect {
-                KbdExpect::Parameter => self.push(&[KBD_ACK]),
+                KbdExpect::Parameter => self.push_kbd(&[KBD_ACK]),
                 KbdExpect::ScanSet => match value {
                     1..=3 => {
                         self.scan_set = value;
-                        self.push(&[KBD_ACK]);
+                        self.push_kbd(&[KBD_ACK]);
                     }
-                    // GSCANSET: the set's code follows the ack.
-                    0 => self.push(&[KBD_ACK, scanset_code(self.scan_set)]),
+                    // GSCANSET: translated set codes with translation on,
+                    // raw set numbers with it off; atkbd parses each form.
+                    0 => {
+                        let code = if (self.command & CONTROL_TRANSLATION) != 0 {
+                            scanset_code(self.scan_set)
+                        } else {
+                            self.scan_set
+                        };
+                        self.push_kbd(&[KBD_ACK, code]);
+                    }
                     // An invalid set keeps the current one; real keyboards
                     // acknowledge twice.
-                    _ => self.push(&[KBD_ACK, KBD_ACK]),
+                    _ => self.push_kbd(&[KBD_ACK, KBD_ACK]),
                 },
             }
             return;
@@ -220,22 +257,36 @@ impl I8042 {
         match value {
             KBD_SET_LED | KBD_SET_REPEAT => {
                 self.kbd_expect = Some(KbdExpect::Parameter);
-                self.push(&[KBD_ACK]);
+                self.push_kbd(&[KBD_ACK]);
             }
             KBD_SET_SCANSET => {
                 self.kbd_expect = Some(KbdExpect::ScanSet);
-                self.push(&[KBD_ACK]);
+                self.push_kbd(&[KBD_ACK]);
             }
-            // Reset: ack, then the built-in assurance test passes. atkbd's
-            // RESET_BAT reads exactly this pair.
-            KBD_RESET => self.push(&[KBD_ACK, KBD_BAT_PASS]),
-            KBD_READ_ID => self.push(&[KBD_ACK, 0xAB, 0x00]),
-            KBD_ECHO => self.push(&[KBD_ECHO]),
-            KBD_RESEND => self.push(&[KBD_ACK]), // nothing left to resend
+            // F5, F6 and FF restore the keyboard defaults: set 2 (QEMU's
+            // ps2.c does the same on every one of them).
+            KBD_RESET_DISABLE | KBD_RESET_DEFAULTS => {
+                self.scan_set = 2;
+                self.push_kbd(&[KBD_ACK]);
+            }
+            KBD_RESET => {
+                self.scan_set = 2;
+                // Ack, then the built-in assurance test passes. atkbd's
+                // RESET_BAT reads exactly this pair.
+                self.push_kbd(&[KBD_ACK, KBD_BAT_PASS]);
+            }
+            // FE repeats the last byte sent to the host without dropping
+            // anything still queued behind it.
+            KBD_RESEND => match self.last_kbd_sent {
+                Some(byte) => self.resp.push_front((byte, true)),
+                None => self.push_kbd(&[KBD_ACK]),
+            },
+            KBD_READ_ID => self.push_kbd(&[KBD_ACK, 0xAB, 0x00]),
+            KBD_ECHO => self.push_kbd(&[KBD_ECHO]),
             // Deliberate leniency: acknowledge anything else (enable,
-            // disable, set defaults, stray bytes) so a driver probe can
-            // never stall the guest on an unsupported command.
-            _ => self.push(&[KBD_ACK]),
+            // disable, make/break modes, stray bytes) so a driver probe
+            // can never stall the guest on an unsupported command.
+            _ => self.push_kbd(&[KBD_ACK]),
         }
     }
 }
@@ -298,6 +349,15 @@ mod tests {
         dev.write(0, &[value]);
     }
 
+    /// Reads the current scan-code set through the GSCANSET sequence.
+    fn query_scan_set(dev: &mut I8042) -> u8 {
+        write_data(dev, KBD_SET_SCANSET);
+        assert_eq!(read_data(dev), KBD_ACK);
+        write_data(dev, 0x00);
+        assert_eq!(read_data(dev), KBD_ACK);
+        read_data(dev)
+    }
+
     #[test]
     fn reset_command_sets_the_shutdown_flag() {
         let (mut dev, reset) = controller();
@@ -337,20 +397,16 @@ mod tests {
         assert_eq!(read_status(&mut dev) & 0x02, 0);
     }
 
-    /// The `atkbd` GSCANSET sequence (ATKBD_CMD_GSCANSET = 0x11f0): send
-    /// F0, read the ack, send the query parameter 00, read the ack and the
-    /// set's code.
+    /// The `atkbd` GSCANSET sequence (ATKBD_CMD_GSCANSET = 0x11f0) with
+    /// the controller's translation on: the query answers the translated
+    /// set code.
     #[test]
-    fn scancode_set_query_and_switch() {
+    fn scancode_set_query_and_switch_translated() {
         let (mut dev, _) = controller();
-        write_data(&mut dev, KBD_SET_SCANSET);
-        assert_eq!(read_data(&mut dev), KBD_ACK);
-        write_data(&mut dev, 0x00);
-        assert_eq!(read_data(&mut dev), KBD_ACK);
-        assert_eq!(read_data(&mut dev), scanset_code(2)); // boots in set 2
+        assert_eq!(query_scan_set(&mut dev), scanset_code(2)); // boots in set 2
         assert_eq!(read_status(&mut dev) & STATUS_OUT_DATA, 0);
 
-        // SSCANSET: switch to set 3, query sees it.
+        // SSCANSET: switch to set 3, query sees its translated code.
         write_data(&mut dev, KBD_SET_SCANSET);
         assert_eq!(read_data(&mut dev), KBD_ACK);
         write_data(&mut dev, 0x03);
@@ -360,11 +416,7 @@ mod tests {
             0,
             "a set switch acks alone"
         );
-        write_data(&mut dev, KBD_SET_SCANSET);
-        assert_eq!(read_data(&mut dev), KBD_ACK);
-        write_data(&mut dev, 0x00);
-        assert_eq!(read_data(&mut dev), KBD_ACK);
-        assert_eq!(read_data(&mut dev), scanset_code(3));
+        assert_eq!(query_scan_set(&mut dev), scanset_code(3));
 
         // An invalid set keeps the current one and acks twice.
         write_data(&mut dev, KBD_SET_SCANSET);
@@ -372,11 +424,63 @@ mod tests {
         write_data(&mut dev, 0x07);
         assert_eq!(read_data(&mut dev), KBD_ACK);
         assert_eq!(read_data(&mut dev), KBD_ACK);
+        assert_eq!(query_scan_set(&mut dev), scanset_code(3));
+    }
+
+    /// With translation off (command byte bit 1 cleared), the query
+    /// answers the raw set number — the other form atkbd parses.
+    #[test]
+    fn scancode_set_query_is_raw_without_translation() {
+        let (mut dev, _) = controller();
+        write_command(&mut dev, CMD_WRITE_CONTROL);
+        write_data(
+            &mut dev,
+            CONTROL_FIRST_PORT_ENABLED | CONTROL_SECOND_PORT_ENABLED,
+        ); // translation off
+        assert_eq!(query_scan_set(&mut dev), 2);
         write_data(&mut dev, KBD_SET_SCANSET);
+        read_data(&mut dev);
+        write_data(&mut dev, 0x01);
+        read_data(&mut dev);
+        assert_eq!(query_scan_set(&mut dev), 1);
+    }
+
+    #[test]
+    fn reset_commands_restore_scan_set_two() {
+        let (mut dev, _) = controller();
+        // Move to set 3 first, then every reset path must bring set 2 back.
+        write_data(&mut dev, KBD_SET_SCANSET);
+        read_data(&mut dev);
+        write_data(&mut dev, 0x03);
+        read_data(&mut dev);
+        assert_eq!(query_scan_set(&mut dev), scanset_code(3));
+
+        for cmd in [KBD_RESET_DISABLE, KBD_RESET_DEFAULTS, KBD_RESET] {
+            write_data(&mut dev, cmd);
+            read_data(&mut dev); // FA (FF also queued AA; drained by the query's clear-push)
+            assert_eq!(
+                query_scan_set(&mut dev),
+                scanset_code(2),
+                "after {cmd:#02x}"
+            );
+        }
+    }
+
+    #[test]
+    fn resend_repeats_the_last_keyboard_byte() {
+        let (mut dev, _) = controller();
+        write_data(&mut dev, KBD_READ_ID);
         assert_eq!(read_data(&mut dev), KBD_ACK);
-        write_data(&mut dev, 0x00);
-        assert_eq!(read_data(&mut dev), KBD_ACK);
-        assert_eq!(read_data(&mut dev), scanset_code(3));
+        assert_eq!(read_data(&mut dev), 0xAB);
+        // The host NAKs AB and asks for it again: FE re-queues the last
+        // keyboard byte ahead of the unread remainder, no clearing.
+        write_data(&mut dev, KBD_RESEND);
+        assert_eq!(read_data(&mut dev), 0xAB);
+        assert_eq!(read_data(&mut dev), 0x00);
+        // A resend with no history yet acknowledges instead.
+        let (mut fresh, _) = controller();
+        write_data(&mut fresh, KBD_RESEND);
+        assert_eq!(read_data(&mut fresh), KBD_ACK);
     }
 
     #[test]
@@ -431,15 +535,18 @@ mod tests {
         write_command(&mut dev, CMD_DISABLE_FIRST_PORT);
         write_command(&mut dev, CMD_DISABLE_SECOND_PORT);
         write_command(&mut dev, CMD_READ_CONTROL);
-        assert_eq!(read_data(&mut dev), 0);
+        assert_eq!(read_data(&mut dev), CONTROL_TRANSLATION);
         write_command(&mut dev, CMD_ENABLE_FIRST_PORT);
         write_command(&mut dev, CMD_READ_CONTROL);
-        assert_eq!(read_data(&mut dev), CONTROL_FIRST_PORT_ENABLED);
+        assert_eq!(
+            read_data(&mut dev),
+            CONTROL_TRANSLATION | CONTROL_FIRST_PORT_ENABLED
+        );
         write_command(&mut dev, CMD_ENABLE_SECOND_PORT);
         write_command(&mut dev, CMD_READ_CONTROL);
         assert_eq!(
             read_data(&mut dev),
-            CONTROL_FIRST_PORT_ENABLED | CONTROL_SECOND_PORT_ENABLED
+            CONTROL_TRANSLATION | CONTROL_FIRST_PORT_ENABLED | CONTROL_SECOND_PORT_ENABLED
         );
     }
 
