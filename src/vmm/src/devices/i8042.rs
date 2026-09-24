@@ -18,10 +18,10 @@
 //! own commands arrive on 0x64, while keyboard commands the guest writes to
 //! 0x60 pass through to the attached device, which answers there — and the
 //! device keeps its own one-deep parameter state (`F0`, `ED`, `F3` wait for
-//! a follow-up byte). The controller's translation bit (command byte bit 1)
-//! selects whether the keyboard's scan-set query answers with translated
-//! codes (43/41/3F) or the raw set number, which is what Linux's `atkbd`
-//! branches on. Linux's `i8042` and `atkbd` drivers also wait for
+//! a follow-up byte). The controller's translation bit (command register
+//! bit 6) selects whether the keyboard's scan-set query answers with
+//! translated codes (43/41/3F) or the raw set number, which is what Linux's
+//! `atkbd` branches on. Linux's `i8042` and `atkbd` drivers also wait for
 //! Input-Buffer-Full to stay clear before writing — so this emulation,
 //! which consumes every byte synchronously, always reports the input
 //! buffer empty. Behavior cross-checked against libkrun/Firecracker's
@@ -75,10 +75,9 @@ const KBD_ACK: u8 = 0xFA;
 const CONTROLLER_TEST_PASS: u8 = 0x55;
 const KBD_BAT_PASS: u8 = 0xAA;
 
-/// The translated answers to a `F0 00` query when the controller's
-/// translation is on, per the AT command set (set 1 → 43, 2 → 41, 3 → 3F).
-/// With translation off the raw set number answers instead, and `atkbd`
-/// parses the two forms differently.
+/// Query answers for `F0 00`, the translated set codes the AT command set
+/// documents (set 1 → 43, set 2 → 41, set 3 → 3F). Linux's `atkbd`
+/// `GSCANSET` reads exactly one of these after the second ack.
 const fn scanset_code(set: u8) -> u8 {
     match set {
         1 => 0x43,
@@ -87,10 +86,16 @@ const fn scanset_code(set: u8) -> u8 {
     }
 }
 
-// Control register bits this emulation keeps.
-const CONTROL_TRANSLATION: u8 = 0x02; // hardware bit 1; BIOS boots it set
-const CONTROL_FIRST_PORT_ENABLED: u8 = 0x10;
-const CONTROL_SECOND_PORT_ENABLED: u8 = 0x20;
+// Control register bits, positions verbatim from Linux's <linux/i8042.h>
+// (I8042_CTR_KBDINT/AUXINT/KBDDIS/AUXDIS/XLATE). The port bits carry disable
+// semantics: commands 0xAD/0xA7 set them to lock a port out, 0xAE/0xAC
+// clear them. A BIOS-clean controller boots with the ports enabled (bits
+// clear), translation on, and both interrupt enables set: 0x43.
+const CONTROL_KBD_INTERRUPT: u8 = 0x01;
+const CONTROL_AUX_INTERRUPT: u8 = 0x02;
+const CONTROL_FIRST_PORT_DISABLED: u8 = 0x10;
+const CONTROL_SECOND_PORT_DISABLED: u8 = 0x20;
+const CONTROL_TRANSLATION: u8 = 0x40;
 
 /// Controller commands whose parameter byte arrives on the data port.
 #[derive(PartialEq, Eq)]
@@ -126,7 +131,7 @@ pub struct I8042 {
     kbd_expect: Option<KbdExpect>,
     /// The attached keyboard's scan-code set; PS/2 keyboards boot in set 2.
     scan_set: u8,
-    /// Host-visible replies, drained one byte per 0x60 read. Each byte
+    /// Host-visible responses, drained one byte per 0x60 read. Each byte
     /// remembers whether it came from the keyboard, so `FE` resend re-sends
     /// only keyboard traffic.
     resp: VecDeque<(u8, bool)>,
@@ -144,9 +149,10 @@ impl I8042 {
     pub fn new(reset_requested: Arc<AtomicBool>) -> Self {
         Self {
             reset: reset_requested,
-            // POST passed, both ports enabled, translation on: what a
-            // clean-booting PC reports.
-            command: CONTROL_TRANSLATION | CONTROL_FIRST_PORT_ENABLED | CONTROL_SECOND_PORT_ENABLED,
+            // 0x43: POST passed, both ports enabled (disable bits clear),
+            // translation on, both interrupt enables set — what a
+            // clean-booting PC reports through CMD_READ_CONTROL.
+            command: CONTROL_KBD_INTERRUPT | CONTROL_AUX_INTERRUPT | CONTROL_TRANSLATION,
             output_port: 0,
             expect: None,
             kbd_expect: None,
@@ -202,12 +208,12 @@ impl I8042 {
             CMD_RESET_CPU => self.reset.store(true, Ordering::SeqCst),
             CMD_READ_CONTROL => self.push(&[self.command]),
             CMD_WRITE_CONTROL => self.expect = Some(Expect::ControlByte),
-            // The enable/disable commands fold into the two port-enable
-            // bits we keep of the control register.
-            CMD_DISABLE_FIRST_PORT => self.command &= !CONTROL_FIRST_PORT_ENABLED,
-            CMD_ENABLE_FIRST_PORT => self.command |= CONTROL_FIRST_PORT_ENABLED,
-            CMD_DISABLE_SECOND_PORT => self.command &= !CONTROL_SECOND_PORT_ENABLED,
-            CMD_ENABLE_SECOND_PORT => self.command |= CONTROL_SECOND_PORT_ENABLED,
+            // The enable/disable commands set and clear the two port
+            // disable bits we keep of the control register.
+            CMD_DISABLE_FIRST_PORT => self.command |= CONTROL_FIRST_PORT_DISABLED,
+            CMD_ENABLE_FIRST_PORT => self.command &= !CONTROL_FIRST_PORT_DISABLED,
+            CMD_DISABLE_SECOND_PORT => self.command |= CONTROL_SECOND_PORT_DISABLED,
+            CMD_ENABLE_SECOND_PORT => self.command &= !CONTROL_SECOND_PORT_DISABLED,
             CMD_CONTROLLER_TEST => self.push(&[CONTROLLER_TEST_PASS]),
             CMD_READ_OUTPUT_PORT => self.push(&[self.output_port]),
             CMD_WRITE_OUTPUT_PORT => self.expect = Some(Expect::OutputPort),
@@ -235,8 +241,9 @@ impl I8042 {
                         self.scan_set = value;
                         self.push_kbd(&[KBD_ACK]);
                     }
-                    // GSCANSET: translated set codes with translation on,
-                    // raw set numbers with it off; atkbd parses each form.
+                    // GSCANSET: the set's code follows the ack — translated
+                    // values with the controller's translation bit set, the
+                    // raw set number with it clear. atkbd parses both forms.
                     0 => {
                         let code = if (self.command & CONTROL_TRANSLATION) != 0 {
                             scanset_code(self.scan_set)
@@ -427,16 +434,15 @@ mod tests {
         assert_eq!(query_scan_set(&mut dev), scanset_code(3));
     }
 
-    /// With translation off (command byte bit 1 cleared), the query
+    /// With translation off (control register bit 6 cleared), the query
     /// answers the raw set number — the other form atkbd parses.
     #[test]
     fn scancode_set_query_is_raw_without_translation() {
         let (mut dev, _) = controller();
         write_command(&mut dev, CMD_WRITE_CONTROL);
-        write_data(
-            &mut dev,
-            CONTROL_FIRST_PORT_ENABLED | CONTROL_SECOND_PORT_ENABLED,
-        ); // translation off
+        // Ports enabled (disable bits clear), translation off: the 0x00 of
+        // the BIOS value minus XLATE.
+        write_data(&mut dev, CONTROL_KBD_INTERRUPT | CONTROL_AUX_INTERRUPT);
         assert_eq!(query_scan_set(&mut dev), 2);
         write_data(&mut dev, KBD_SET_SCANSET);
         read_data(&mut dev);
@@ -530,23 +536,33 @@ mod tests {
     }
 
     #[test]
-    fn port_enables_fold_into_the_control_register() {
+    fn port_locks_fold_into_the_control_register() {
         let (mut dev, _) = controller();
-        write_command(&mut dev, CMD_DISABLE_FIRST_PORT);
-        write_command(&mut dev, CMD_DISABLE_SECOND_PORT);
-        write_command(&mut dev, CMD_READ_CONTROL);
-        assert_eq!(read_data(&mut dev), CONTROL_TRANSLATION);
-        write_command(&mut dev, CMD_ENABLE_FIRST_PORT);
+        // A clean PC boots at 0x43: interrupts + translation, ports enabled.
         write_command(&mut dev, CMD_READ_CONTROL);
         assert_eq!(
             read_data(&mut dev),
-            CONTROL_TRANSLATION | CONTROL_FIRST_PORT_ENABLED
+            CONTROL_KBD_INTERRUPT | CONTROL_AUX_INTERRUPT | CONTROL_TRANSLATION
         );
+        // 0xAD/0xA7 lock the ports out (disable bits set).
+        write_command(&mut dev, CMD_DISABLE_FIRST_PORT);
+        write_command(&mut dev, CMD_DISABLE_SECOND_PORT);
+        write_command(&mut dev, CMD_READ_CONTROL);
+        assert_eq!(
+            read_data(&mut dev),
+            CONTROL_KBD_INTERRUPT
+                | CONTROL_AUX_INTERRUPT
+                | CONTROL_TRANSLATION
+                | CONTROL_FIRST_PORT_DISABLED
+                | CONTROL_SECOND_PORT_DISABLED
+        );
+        // 0xAE/0xAC re-enable them.
+        write_command(&mut dev, CMD_ENABLE_FIRST_PORT);
         write_command(&mut dev, CMD_ENABLE_SECOND_PORT);
         write_command(&mut dev, CMD_READ_CONTROL);
         assert_eq!(
             read_data(&mut dev),
-            CONTROL_TRANSLATION | CONTROL_FIRST_PORT_ENABLED | CONTROL_SECOND_PORT_ENABLED
+            CONTROL_KBD_INTERRUPT | CONTROL_AUX_INTERRUPT | CONTROL_TRANSLATION
         );
     }
 

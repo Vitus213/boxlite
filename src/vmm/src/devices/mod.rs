@@ -165,7 +165,7 @@ mod tests {
         m.write(0x3F9, 0x01);
         m.write(0x3FC, 0x08);
         assert_eq!(m.read(0x3F9), 0x01);
-        assert_eq!(m.read(0x3FB), 0x00); // LCR is write-only: DLAB gone
+        assert_eq!(m.read(0x3FB), 0x03); // LCR reads back 0x03 (8N1, DLAB clear)
 
         // 3. TX "hello" one byte at a time; each lands in the host sink.
         for byte in b"hello" {

@@ -38,10 +38,14 @@ const B_24H: u8 = 0x02; // hour format: set = 24-hour, clear = 12-hour
 const B_SET: u8 = 0x80; // freeze the clock: live reads return stored NVRAM
 
 // Fixed status registers.
-const REG_A: u8 = 0x26; // 32.768 kHz / 62.5 Hz divider field, oscillator running (VRF=0)
-// Register C (interrupt flags) and D (oscillator/vbat flags) read 0x00:
-// this device never schedules update-end or periodic interrupts, so the
-// microVM simplification is "no pending events, ever".
+const REG_A: u8 = 0x26; // 32.768 kHz divider (bits 6:4), rate select 0110 (bits 3:0), UIP (bit 7) clear
+// Register C (interrupt flags) reads 0x00: this device never schedules
+// update-end or periodic interrupts, so no event is ever pending.
+// Register D bit 7 (VRF) reads 1: the clock and NVRAM are valid, as they
+// are on any PC whose CMOS battery is healthy. Linux's mc146818_get_time
+// does not gate on VRF, but a 0 here would mean "battery dead, time
+// unreliable", which is not what a fresh VM reports.
+const REG_D: u8 = 0x80;
 
 /// Seconds since the Unix epoch of a `SystemTime`, or 0 before 1970.
 fn unix_seconds(now: SystemTime) -> u64 {
@@ -192,7 +196,8 @@ impl CmosRtc {
         }
         match reg {
             0x0A => REG_A,
-            0x0C | 0x0D => 0,
+            0x0C => 0,
+            0x0D => REG_D,
             _ => self
                 .live(reg, unix_seconds((self.clock)()))
                 .unwrap_or(self.ram[reg]),
@@ -323,12 +328,15 @@ mod tests {
         let mut rtc = rtc_at(NOW);
         assert_eq!(read_reg(&mut rtc, 0x0A), REG_A);
         assert_eq!(read_reg(&mut rtc, 0x0C), 0x00);
-        assert_eq!(read_reg(&mut rtc, 0x0D), 0x00);
+        assert_eq!(read_reg(&mut rtc, 0x0D), REG_D);
+        assert_eq!(read_reg(&mut rtc, 0x0D), 0x80); // VRF set: valid RAM and time
         // Writing them changes nothing observable.
         write_reg(&mut rtc, 0x0A, 0xFF);
         write_reg(&mut rtc, 0x0C, 0xFF);
+        write_reg(&mut rtc, 0x0D, 0xFF);
         assert_eq!(read_reg(&mut rtc, 0x0A), REG_A);
         assert_eq!(read_reg(&mut rtc, 0x0C), 0x00);
+        assert_eq!(read_reg(&mut rtc, 0x0D), REG_D);
     }
 
     #[test]
