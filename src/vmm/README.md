@@ -6,8 +6,8 @@ points still sketch event dispatch, guest exits, and worker cleanup with inline
 `todo!()` operations that panic if called; vCPU exits use
 `boxlite_hypervisor::VcpuExit`, and `Error` wraps `boxlite_hypervisor::Error`
 with its cause chain intact. The address buses and the device interrupt path
-are implemented, as are the x86_64 serial console and i8042 reset; the lifecycle
-does not register them yet. This crate cannot boot a kernel yet. The
+are implemented, as are the x86_64 serial console, CMOS RTC and i8042 reset;
+the lifecycle does not register them yet. This crate cannot boot a kernel yet. The
 [VMM design](../../docs/contributing/architecture/vmm/README.md) specifies the
 lifecycle API, memory layout, buses, interrupts, and threads it will implement.
 
@@ -32,7 +32,7 @@ boxlite-vmm
 | `vcpu` | Worker threads, stop coordination, and exit handling |
 | `irq` | `IrqSender`, the device interrupt path, over any backend `Vm`; HVF and KVM provide the controller, WHP (M10) only local APICs |
 | `bus` | `Bus` (MMIO) and, on x86_64, `IoBus` (ports): window registration and device I/O dispatch |
-| `devices` | x86_64 legacy devices: the 8250 serial console and the i8042 reset |
+| `devices` | x86_64 legacy devices: the 8250 serial console, the CMOS RTC and the i8042 reset |
 
 Backend implementation and guest boot follow in M1. Virtio devices, the BoxLite
 engine adapter, engine selection, and `native` feature wiring follow in M2.
@@ -64,7 +64,14 @@ in `devices`: bus offsets, interrupt delivery and reset reporting.
 | Device | Ports | BoxLite adapter |
 | --- | --- | --- |
 | 8250 serial (16550A) | `0x3F8`–`0x3FF`, GSI 4 | output to a `Write` sink; `vm-superio` signals each new interrupt once, so `IrqTrigger` sends an edge; `enqueue_input` feeds the receive FIFO |
+| CMOS RTC (MC146818), local | `0x70` index, `0x71` data | renders the time registers from an injected clock in UTC; register B boots at `0x02` (BCD, 24-hour) |
 | i8042, reset only | one window at `0x60`: data at offset 0, command at offset 4 | `0xFE` on the command port sets the reset flag through `ResetTrigger`; reads are `0` |
+
+`vm-superio` has no CMOS RTC, so `devices::rtc` is BoxLite's own. Register B
+boots at `0x02`, as a PC BIOS leaves it, because Linux's `rtc-cmos` refuses
+to probe a 12-hour clock that has an IRQ. Writes to the time registers
+stick only while register B's SET bit holds the clock; alarm bytes keep the
+`0xC0`-`0xFF` "don't care" values.
 
 No guest keyboard is configured in M1, so the i8042 emulates no keyboard
 protocol. The reset is a flag, not a stop: the vCPU loop checks it right after

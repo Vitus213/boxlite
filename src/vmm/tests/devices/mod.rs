@@ -10,9 +10,10 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, UNIX_EPOCH},
 };
 
-use super::{i8042::I8042, serial::Serial};
+use super::{i8042::I8042, rtc::CmosRtc, serial::Serial};
 use crate::{
     bus::IoBus,
     error::Error,
@@ -94,6 +95,10 @@ fn machine() -> Machine {
         Arc::new(Mutex::new(I8042::new(Arc::clone(&reset)))),
     )
     .unwrap();
+    // 2026-09-22T12:34:56Z.
+    let rtc = CmosRtc::new(|| UNIX_EPOCH + Duration::from_secs(1_790_080_496));
+    bus.insert(CmosRtc::PORT_INDEX, 2, Arc::new(Mutex::new(rtc)))
+        .unwrap();
 
     Machine {
         bus,
@@ -201,9 +206,22 @@ fn only_the_reset_command_on_port_0x64_requests_a_reset() {
 }
 
 #[test]
+fn the_clock_answers_in_bcd_24_hour_mode_on_ports_0x70_and_0x71() {
+    let m = machine();
+    for (register, value) in [(0x00, 0x56), (0x04, 0x12), (0x09, 0x26), (0x0B, 0x02)] {
+        m.write(CmosRtc::PORT_INDEX, register);
+        assert_eq!(
+            m.read(CmosRtc::PORT_DATA),
+            value,
+            "register {register:#04x}"
+        );
+    }
+}
+
+#[test]
 fn ports_outside_the_windows_stay_unmapped() {
     let m = machine();
-    for port in [0x100u16, 0x65, 0x400] {
+    for port in [0x100u16, 0x65, 0x72, 0x400] {
         assert!(matches!(
             m.bus.read(port, &mut [0u8; 1]),
             Err(Error::IoUnmapped { port: p }) if p == port

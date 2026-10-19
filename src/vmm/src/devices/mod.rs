@@ -10,6 +10,7 @@
 //! architecture-gated where `lib.rs` declares it.
 
 pub mod i8042;
+pub mod rtc;
 pub mod serial;
 
 use std::sync::{
