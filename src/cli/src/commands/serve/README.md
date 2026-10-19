@@ -8,10 +8,10 @@ sessions.
 ## Quick Start
 
 ```bash
-boxlite serve                      # listen on 0.0.0.0:8100 (permissive)
+boxlite serve                      # listen on 127.0.0.1:8100 (permissive)
 boxlite serve --port 9090          # custom port
-boxlite serve --host 127.0.0.1    # bind localhost only
 boxlite serve --api-key dev-key    # require Bearer dev-key (else 401)
+boxlite serve --host 0.0.0.0 --api-key "$KEY"  # expose on the network (key required)
 ```
 
 Ctrl-C triggers graceful shutdown (`runtime.shutdown` with a 10 s timeout).
@@ -119,7 +119,9 @@ All paths are relative to the server root (e.g. `http://localhost:8100`).
 **Auth.** With `--api-key <KEY>` (or `$BOXLITE_SERVE_API_KEY`) set, every
 route except `GET /v1/config` requires `Authorization: Bearer <KEY>`
 (constant-time match) and returns `401` otherwise. Without it the server is
-permissive (accepts any/no bearer) — the zero-config local-dev default.
+permissive (accepts any/no bearer) — the zero-config local-dev default. A
+permissive server only binds to loopback: `serve` refuses to start on any
+other `--host` (e.g. `0.0.0.0`) unless an API key is set.
 
 ### Box CRUD & Lifecycle
 
@@ -256,8 +258,8 @@ GET /v1/boxes/{box_id}/executions/{id}/attach
        │    ├─ Text {"type":"signal"}  → Refuse: error frame; else execution.signal()
        │    └─ Text {"type":"stdin_eof"}  → Refuse: error frame; else stdin.close() + drop
        │       (Refuse answers each kind once; the reader keeps draining so the
-       │        writer can flush its close — whichever task ends first aborts
-       │        the other.)
+       │        writer can flush its close, and past that close until the peer
+       │        answers it.)
        │
        ├─ tokio::spawn(writer)                 — server → client
        │    ├─ if already done → drain backlog only (fast path)
@@ -269,7 +271,16 @@ GET /v1/boxes/{box_id}/executions/{id}/attach
        │    │    done_rx.changed()→ drain remaining, break
        │    └─ if done: Text {"type":"exit","exit_code":N} + Close
        │
-       └─ select!(reader, writer)              — first to finish aborts the other
+       └─ select!(reader, writer)
+            ├─ reader first → abort writer
+            ├─ writer first, Close sent → wait up to ATTACH_PEER_CLOSE_WAIT
+            │                 (5 s) for the reader to see the peer's, and abort
+            │                 it only if that elapses. Cutting the reader off
+            │                 here leaves the client's in-flight stdin unread,
+            │                 and closing a socket with unread data sends RST —
+            │                 which discards the exit frame.
+            ├─ writer first, no Close (a send failed) → abort at once; there is
+            │                 no handshake open to wait for.
             └─ mark_disconnected()
 ```
 
@@ -398,7 +409,7 @@ sets `reaping_kill` under one lock acquisition.
 | Flag     | Default   | Description              |
 |----------|-----------|--------------------------|
 | `--port` | `8100`    | TCP port to listen on    |
-| `--host` | `0.0.0.0` | Address to bind          |
+| `--host` | `127.0.0.1` | Address to bind; non-loopback requires `--api-key` |
 
 ### Internal Constants
 

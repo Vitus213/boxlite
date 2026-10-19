@@ -675,7 +675,10 @@ mod tests {
         serial.read(0, &mut data);
         assert_eq!(data[0], b'x');
         assert!(serial.rx.is_empty());
-        assert!(serial.pending_line.is_none(), "early-return must clear pending_line");
+        assert!(
+            serial.pending_line.is_none(),
+            "early-return must clear pending_line"
+        );
 
         // A subsequent access must not retry anything: no spurious calls.
         serial.read(5, &mut data);

@@ -1,13 +1,15 @@
 # Run hosted-runner tests and collect coverage across the runtime and SDKs.
 #
-# Non-VM integration suites use test-only runtime construction because GitHub
-# runners cannot provide the virtualization needed by production startup.
+# Non-VM integration suites use test-only runtime construction. Native x86_64
+# hypervisor tests separately exercise KVM without booting the BoxLite runtime.
 #
 # Test coverage:
 # - Rust: units and non-VM integration, with llvm-cov coverage
 # - Python: pytest with -m "not integration"
 # - Node.js: vitest unit project
-# - Go: SDK, networking bridge, and the runner; API: Jest with Postgres and Redis
+# - Go: SDK, networking bridge, the runner and the image service; API: Jest with Postgres and Redis
+# - Dashboard: vitest with jsdom, v8 coverage
+# - Plugins: Python package tests and real CLI check/dist commands
 name: Test
 
 on:
@@ -37,6 +39,9 @@ on:
       - 'rust-toolchain.toml'
       - 'sdks/**'
       - 'apps/api/**'
+      - 'apps/image-service/**'
+      - 'apps/dashboard/**'
+      - 'apps/libs/api-client/**'
       - 'apps/runner/**'
       - 'apps/go.work'
       - 'apps/go.work.sum'
@@ -55,6 +60,10 @@ on:
       - 'openapi/**'
       - 'codecov.yml'
       - '!**/*.md'
+      - 'plugins/boxlite/**'
+      - '.agents/plugins/marketplace.json'
+      - 'scripts/plugins/**'
+      - 'tests/plugins/**'
   # No path filter on pull_request: the `Test (conclusion)` job is a required
   # status check, so this workflow must run on EVERY PR and report it. A
   # path-skipped workflow leaves the required check stuck "Pending" → PR blocked.
@@ -91,6 +100,8 @@ jobs:
       node: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.node == 'true' }}
       go: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.go == 'true' }}
       api: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.api == 'true' }}
+      dashboard: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.dashboard == 'true' }}
+      plugins: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.plugins == 'true' }}
       setup: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.setup == 'true' }}
       infra: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.infra == 'true' }}
     steps:
@@ -178,6 +189,7 @@ jobs:
             go:
               - 'sdks/go/**/!(*.md)'
               - 'src/deps/libgvproxy-sys/**/!(*.md)'
+              - 'apps/image-service/**/!(*.md)'
               - 'apps/runner/**/!(*.md)'
               - 'apps/go.work'
               - 'apps/go.work.sum'
@@ -200,11 +212,30 @@ jobs:
               - '.github/workflows/lint.yml'
             api:
               - 'apps/api/**/!(*.md)'
+              - 'openapi/box.openapi.yaml'
               - 'apps/package.json'
               - 'apps/yarn.lock'
               - 'apps/nx.json'
               - 'apps/jest.preset.js'
               - 'codecov.yml'
+              - '.github/workflows/test.yml'
+            dashboard:
+              - 'apps/dashboard/**/!(*.md)'
+              - 'apps/libs/api-client/**/!(*.md)'
+              - 'apps/package.json'
+              - 'apps/yarn.lock'
+              - 'apps/nx.json'
+              - 'codecov.yml'
+              - '.github/workflows/test.yml'
+            plugins:
+              - '.agents/plugins/marketplace.json'
+              - 'plugins/boxlite/**'
+              - 'scripts/plugins/**'
+              - 'tests/plugins/**'
+              - 'Makefile'
+              - 'make/plugins.mk'
+              - 'codecov.yml'
+              - '.github/actions/setup-python/**/!(*.md)'
               - '.github/workflows/test.yml'
             setup:
               - '.gitmodules'
@@ -219,6 +250,9 @@ jobs:
               - 'Makefile'
               - 'make/test.mk'
               - 'make/changes.mk'
+              # The infra suite asserts Codecov's ignore list covers every test
+              # source, so a change to it has to run that suite.
+              - 'codecov.yml'
 
   infra:
     name: Workflow and infrastructure checks
@@ -291,6 +325,26 @@ jobs:
           BOXLITE_DEPS_STUB: "1"
         run: make coverage:lcov NEXTEST_PROFILE=ci
 
+      - name: Enable KVM access for native hypervisor tests
+        if: matrix.platform.target == 'linux-x64-gnu'
+        run: sudo chmod a+rw /dev/kvm
+
+      - name: Run KVM hardware tests with coverage
+        if: matrix.platform.target == 'linux-x64-gnu'
+        timeout-minutes: 5
+        run: make coverage:vmm:kvm
+
+      - uses: actions/setup-node@v4
+        if: matrix.platform.target == 'linux-x64-gnu'
+        with:
+          node-version: '22'
+
+      - name: Measure native bindings through SDK callers
+        if: matrix.platform.target == 'linux-x64-gnu'
+        env:
+          BOXLITE_DEPS_STUB: '1'
+        run: make coverage:bindings:external
+
       - name: Run OpenAPI reference-server unit tests
         # Keyed on BoxliteError's Display text (src/shared/src/errors.rs, in this
         # filter), so a new variant must add its row there before the reference
@@ -305,6 +359,16 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           files: target/coverage/lcov.info
+          flags: rust-unit
+          use_oidc: true
+          disable_search: true
+          fail_ci_if_error: true
+
+      - name: Upload external native binding coverage
+        if: matrix.platform.target == 'linux-x64-gnu'
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/coverage/native-sdk/lcov.info,target/coverage/python/coverage.xml
           flags: rust-unit
           use_oidc: true
           disable_search: true
@@ -439,7 +503,7 @@ jobs:
 
       - uses: ./.github/actions/sccache
 
-      - name: Run Go SDK, networking, and runner tests with coverage
+      - name: Run Go SDK, networking, runner and image-service tests with coverage
         run: make coverage:go
 
       # coverage:go has already built the native library needed by both analyzers.
@@ -457,7 +521,7 @@ jobs:
       - name: Upload Go coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: target/coverage/go-sdk.out,target/coverage/gvproxy.out,target/coverage/runner.out
+          files: target/coverage/go-sdk.out,target/coverage/gvproxy.out,target/coverage/runner.out,target/coverage/image-service.out
           flags: go
           use_oidc: true
           disable_search: true
@@ -590,6 +654,74 @@ jobs:
           disable_search: true
           fail_ci_if_error: true
 
+  dashboard:
+    name: Dashboard Tests
+    needs: changes
+    if: ${{ needs.changes.outputs.dashboard == 'true' }}
+    runs-on: "ubuntu-latest"
+    permissions: # Read source; OIDC authenticates the coverage upload.
+      contents: "read"
+      id-token: write
+    defaults: # Keep package-manager commands inside the apps workspace.
+      run:
+        working-directory: "apps"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: ${{ false }}
+      - name: Enable Corepack
+        run: "corepack enable"
+      - uses: actions/setup-node@v4
+        with: # Match the apps workspace toolchain and cache key.
+          node-version: "22"
+          cache: "yarn"
+          cache-dependency-path: "apps/yarn.lock"
+      - name: Install app dependencies
+        run: "yarn install --immutable"
+      - name: Run dashboard unit tests
+        run: "yarn nx run dashboard:test --coverage --skip-nx-cache"
+
+      - name: Upload dashboard coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/coverage/dashboard/lcov.info
+          flags: dashboard
+          use_oidc: true
+          disable_search: true
+          fail_ci_if_error: true
+
+  plugins:
+    name: Plugin package coverage
+    needs: changes
+    if: ${{ needs.changes.outputs.plugins == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-python
+      - name: Install coverage collector
+        run: python3 -m pip install coverage==7.13.5
+      - name: Measure plugin package tests and CLI commands
+        run: make plugin:boxlite:coverage
+      - name: Save plugin coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-coverage
+          path: target/coverage/plugins/coverage.xml
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload plugin coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/coverage/plugins/coverage.xml
+          flags: plugins
+          use_oidc: true
+          disable_search: true
+          fail_ci_if_error: true
+
   # A skipped test job cannot publish Codecov's separately required status.
   # Validate the PR's changed files with Codecov instead of forcing a pass.
   coverage-empty:
@@ -602,7 +734,9 @@ jobs:
           needs.changes.outputs.python == 'false' &&
           needs.changes.outputs.node == 'false' &&
           needs.changes.outputs.go == 'false' &&
-          needs.changes.outputs.api == 'false' }}
+          needs.changes.outputs.api == 'false' &&
+          needs.changes.outputs.dashboard == 'false' &&
+          needs.changes.outputs.plugins == 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -624,7 +758,7 @@ jobs:
   # NOTE: keep `needs` in sync with the jobs above when adding/removing jobs.
   test-conclusion:
     name: Test (conclusion)
-    needs: [changes, infra, rust, python, node, go, setup, api, guest_artifacts, coverage-empty]
+    needs: [changes, infra, rust, python, node, go, setup, api, dashboard, plugins, guest_artifacts, coverage-empty]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions: {}

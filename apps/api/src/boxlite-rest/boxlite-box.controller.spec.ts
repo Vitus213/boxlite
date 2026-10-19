@@ -5,8 +5,15 @@
  */
 
 import 'reflect-metadata'
-import { BadRequestException, ValidationPipe } from '@nestjs/common'
+import { BadRequestException, CallHandler, ExecutionContext, ValidationPipe } from '@nestjs/common'
 import { PIPES_METADATA } from '@nestjs/common/constants'
+import { Reflector } from '@nestjs/core'
+import { firstValueFrom, of } from 'rxjs'
+import { AuditAction } from '../audit/enums/audit-action.enum'
+import { AuditTarget } from '../audit/enums/audit-target.enum'
+import { AuditInterceptor } from '../audit/interceptors/audit.interceptor'
+import { RequiredOrganizationResourcePermissions } from '../organization/decorators/required-organization-resource-permissions.decorator'
+import { OrganizationResourcePermission } from '../organization/enums/organization-resource-permission.enum'
 import { BoxliteBoxController } from './boxlite-box.controller'
 import { CreateBoxDto } from './dto/create-box.dto'
 
@@ -132,5 +139,185 @@ describe('BoxliteBoxController request validation', () => {
     )
 
     expect(dto.volumes?.[0]?.managed_volume).toBe(selector)
+  })
+})
+
+// Enabling inbound access exposes its services to anyone, so this route must ask
+// for the same permission as the dashboard's toggle. Read off the real
+// handler, as the pipe above is, so deleting the decorator fails here.
+describe('BoxliteBoxController permissions', () => {
+  it('requires WRITE_BOXES to change inbound access', () => {
+    const required = new Reflector().get(
+      RequiredOrganizationResourcePermissions,
+      BoxliteBoxController.prototype.updateInboundNetwork,
+    )
+
+    expect(required).toEqual([OrganizationResourcePermission.WRITE_BOXES])
+  })
+})
+
+// GHSA-2qqv-7cwv-mj8h / POL-845: attaching a managed volume is authorized on
+// the caller's volume permissions, independently of WRITE_BOXES. A box-capable
+// key must not reach a volume through box creation.
+describe('BoxliteBoxController volume attachment authorization', () => {
+  const { READ_VOLUMES, WRITE_VOLUMES, WRITE_BOXES } = OrganizationResourcePermission
+
+  function makeController() {
+    const boxService = {
+      create: jest.fn().mockResolvedValue({ id: 'box-1', state: 'started' }),
+      toBoxDto: jest.fn(),
+    }
+    const boxStateWaiter = { waitForStarted: jest.fn() }
+    const commerceBoxLimitService = { resolveMaxCreatedBoxes: jest.fn().mockResolvedValue(10) }
+    const controller = new BoxliteBoxController(
+      boxService as any,
+      boxStateWaiter as any,
+      commerceBoxLimitService as any,
+    )
+    return { controller, boxService }
+  }
+
+  function keyContext(permissions: OrganizationResourcePermission[]) {
+    return {
+      role: 'user',
+      organization: { id: 'org-1' },
+      organizationId: 'org-1',
+      // Owner on purpose: a key is bounded by its own permissions, not widened
+      // by whoever owns it.
+      organizationUser: { role: 'owner', assignedRoles: [] },
+      apiKey: { permissions },
+    } as any
+  }
+
+  // A non-owner member with no API key is caught by neither bypass, so it is
+  // bounded by the permissions its assigned roles carry, resolved exactly as the
+  // guard resolves them (assignedRoles.flatMap, a missing list treated as none).
+  function memberContext(assignedRoles: Array<{ permissions: OrganizationResourcePermission[] }> | undefined) {
+    return {
+      role: 'user',
+      organization: { id: 'org-1' },
+      organizationId: 'org-1',
+      organizationUser: { role: 'member', assignedRoles },
+    } as any
+  }
+
+  const dtoWithVolume = { image: 'alpine:latest', volumes: [{ managed_volume: 'vol_1', guest_path: '/data' }] } as any
+
+  it('refuses a WRITE_BOXES-only key that attaches a volume', async () => {
+    const { controller, boxService } = makeController()
+
+    await expect(controller.createBox(keyContext([WRITE_BOXES]), dtoWithVolume)).rejects.toThrow(/managed volume/)
+    expect(boxService.create).not.toHaveBeenCalled()
+  })
+
+  it('refuses a key holding only one of the two volume permissions', async () => {
+    const { controller, boxService } = makeController()
+
+    await expect(controller.createBox(keyContext([WRITE_BOXES, READ_VOLUMES]), dtoWithVolume)).rejects.toThrow(
+      /write:volumes/,
+    )
+    expect(boxService.create).not.toHaveBeenCalled()
+  })
+
+  it('refuses a key missing only read:volumes', async () => {
+    const { controller, boxService } = makeController()
+
+    await expect(controller.createBox(keyContext([WRITE_BOXES, WRITE_VOLUMES]), dtoWithVolume)).rejects.toThrow(
+      /read:volumes/,
+    )
+    expect(boxService.create).not.toHaveBeenCalled()
+  })
+
+  it('allows a key holding both volume permissions', async () => {
+    const { controller, boxService } = makeController()
+
+    await controller.createBox(keyContext([WRITE_BOXES, READ_VOLUMES, WRITE_VOLUMES]), dtoWithVolume)
+
+    expect(boxService.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not gate a volume-free create on volume permissions', async () => {
+    const { controller, boxService } = makeController()
+
+    await controller.createBox(keyContext([WRITE_BOXES]), { image: 'alpine:latest' } as any)
+
+    expect(boxService.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('exempts a system admin and an interactive owner without a key', async () => {
+    const { controller, boxService } = makeController()
+    const admin = { role: 'admin', organization: { id: 'org-1' }, organizationId: 'org-1' } as any
+    const owner = {
+      role: 'user',
+      organization: { id: 'org-1' },
+      organizationId: 'org-1',
+      organizationUser: { role: 'owner', assignedRoles: [] },
+    } as any
+
+    await controller.createBox(admin, dtoWithVolume)
+    await controller.createBox(owner, dtoWithVolume)
+
+    expect(boxService.create).toHaveBeenCalledTimes(2)
+  })
+
+  it('allows a member whose assigned roles grant both volume permissions', async () => {
+    const { controller, boxService } = makeController()
+
+    await controller.createBox(memberContext([{ permissions: [READ_VOLUMES, WRITE_VOLUMES] }]), dtoWithVolume)
+
+    expect(boxService.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a member whose assigned roles lack the volume permissions', async () => {
+    const { controller, boxService } = makeController()
+
+    await expect(controller.createBox(memberContext([{ permissions: [WRITE_BOXES] }]), dtoWithVolume)).rejects.toThrow(
+      /managed volume/,
+    )
+    expect(boxService.create).not.toHaveBeenCalled()
+  })
+
+  it('refuses a member that carries no assigned roles', async () => {
+    const { controller, boxService } = makeController()
+
+    await expect(controller.createBox(memberContext(undefined), dtoWithVolume)).rejects.toThrow(/managed volume/)
+    expect(boxService.create).not.toHaveBeenCalled()
+  })
+})
+
+// The audit log for a visibility change must name the box and the mode asked
+// for, and nothing else from the body. Driven through the real interceptor
+// with the handler's own @Audit metadata, so a wrong extractor fails here.
+describe('BoxliteBoxController inbound audit', () => {
+  it('records the box and the requested mode', async () => {
+    const auditService = {
+      createLog: jest.fn().mockResolvedValue({ id: 'audit-1' }),
+      updateLog: jest.fn().mockResolvedValue({ id: 'audit-1' }),
+    }
+    const interceptor = new AuditInterceptor(new Reflector(), auditService as any, { get: jest.fn() } as any)
+    const request = {
+      url: '/api/v1/boxes/box-1/network/inbound',
+      ip: '127.0.0.1',
+      params: { boxId: 'box-1' },
+      body: { mode: 'enabled', allow_net: [] },
+      user: { userId: 'user-1', email: 'dev@example.com', organizationId: 'org-1' },
+      get: jest.fn(),
+    }
+    const context = {
+      getHandler: () => BoxliteBoxController.prototype.updateInboundNetwork,
+      switchToHttp: () => ({ getRequest: () => request, getResponse: () => ({ statusCode: 200 }) }),
+    } as unknown as ExecutionContext
+    const next: CallHandler = { handle: () => of({ mode: 'enabled' }) }
+
+    await firstValueFrom(interceptor.intercept(context, next))
+
+    expect(auditService.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: AuditAction.UPDATE_INBOUND_ACCESS,
+        targetType: AuditTarget.BOX,
+        targetId: 'box-1',
+        metadata: { body: { mode: 'enabled' } },
+      }),
+    )
   })
 })

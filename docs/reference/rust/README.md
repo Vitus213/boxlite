@@ -7,7 +7,7 @@ Complete API reference for the BoxLite Rust SDK.
 The Rust SDK is the core implementation of BoxLite. It provides async-first APIs built on Tokio for creating and managing isolated VM environments.
 
 **Crate**: `boxlite`
-**Repository**: [github.com/anthropics/boxlite](https://github.com/anthropics/boxlite)
+**Repository**: [github.com/boxlite-ai/boxlite](https://github.com/boxlite-ai/boxlite)
 
 ---
 
@@ -15,6 +15,8 @@ The Rust SDK is the core implementation of BoxLite. It provides async-first APIs
 
 - [Runtime Management](#runtime-management)
   - [BoxliteRuntime](#boxliteruntime)
+  - [ImageHandle](#imagehandle)
+  - [RegistryHandle](#registryhandle)
   - [BoxliteOptions](#boxliteoptions)
 - [Box Handle](#box-handle)
   - [LiteBox](#litebox)
@@ -33,6 +35,7 @@ The Rust SDK is the core implementation of BoxLite. It provides async-first APIs
   - [AdvancedBoxOptions](#advancedboxoptions)
   - [RootfsSpec](#rootfsspec)
   - [VolumeSpec](#volumespec)
+  - [MountSpec](#mountspec)
   - [NetworkSpec](#networkspec)
   - [NetworkRateLimit](#networkratelimit)
   - [PortSpec](#portspec)
@@ -97,6 +100,7 @@ let runtime = BoxliteRuntime::default_runtime();
 | `exists` | `async fn exists(&self, id_or_name: &str) -> BoxliteResult<bool>` | Check if box exists |
 | `metrics` | `async fn metrics(&self) -> RuntimeMetrics` | Get runtime-wide metrics |
 | `remove` | `async fn remove(&self, id_or_name: &str, force: bool) -> BoxliteResult<()>` | Remove box completely |
+| `images` | `fn images(&self) -> BoxliteResult<ImageHandle>` | The images this runtime can boot from; never fails |
 
 #### Example
 
@@ -123,6 +127,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+```
+
+### ImageHandle
+
+The images a runtime can boot from: the local cache on an embedded runtime,
+the server catalog on a REST runtime. Registry credentials are accessed through
+`runtime.images()?.registries()?`.
+
+| Operation | Embedded runtime | REST runtime |
+|-----------|------------------|--------------|
+| `pull` | Pulls into the cache | Unsupported; creating a box pulls |
+| `list` | One row per cached reference | Catalog alias and digest references |
+| `get` | Cached versions under the name | Catalog versions, aliases and history |
+| `remove` | Forgets the name; layers stay | Removes the entry; refused while a box can boot from it |
+| `usage` | Unsupported | Image count, allowance and known bytes |
+| `create_alias` | Unsupported | Creates a new alias for a ready digest; existing names conflict |
+| `delete_alias` | Unsupported | Removes only the named alias; absent names return NotFound |
+
+`get` and `remove` take an image name, without a tag or digest, such as
+`quay.io/acme/app`. Alias names use OCI tag syntax; creation takes the
+`sha256:` digest of a ready version recorded for that image.
+
+A registry tag belongs to the upstream registry. A BoxLite alias belongs to
+the runtime catalog and selects a recorded digest independently. A successful
+pull seeds an alias from the registry tag; it never overwrites an existing
+binding. Creating an alias never pushes a registry tag or pulls image bytes.
+
+Alias creation refuses every existing name, even for the same digest, with
+`AlreadyExists`. Delete the alias explicitly before creating it again. Deletion
+removes only the binding: versions and existing boxes keep their digests.
+Creation history remains available; deletion is recorded by the server audit log.
+
+Image details and versions expose `aliases`. Their `history` contains
+`ImageAliasEvent` records with `alias`, optional `from_digest`, `to_digest`,
+optional `actor` and `recorded_at`. A local cache mirrors its cached registry
+tags in `aliases`, leaves history empty and refuses alias writes.
+
+```rust
+let images = runtime.images()?;
+let detail = images.get("quay.io/acme/app").await?;
+images.create_alias(&detail.name, "verified", &detail.versions[0].digest).await?;
+images.delete_alias(&detail.name, "verified").await?;
+let logins = images.registries()?.list().await?;
+```
+
+### RegistryHandle
+
+The logins a REST server presents when it pulls a private image for a box.
+Obtained with `runtime.images()?.registries()?`, which an embedded runtime refuses with
+`Unsupported`: it pulls with the logins in `BoxliteOptions::image_registries`.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `list` | `async fn list(&self) -> BoxliteResult<Vec<RegistryCredential>>` | Every login the organization holds, oldest first |
+| `create` | `async fn create(&self, credential: &NewRegistryCredential) -> BoxliteResult<RegistryCredential>` | Add a login; `AlreadyExists` while one is held for the same registry and prefix |
+| `remove` | `async fn remove(&self, id: &str) -> BoxliteResult<()>` | Remove a login; `InvalidState`, naming the boxes, while a box still pulls through it; `NotFound` for an unknown id |
+
+The password goes up once, in the create. `RegistryCredential` has no
+password field, and `NewRegistryCredential`'s `Debug` prints it as
+`[redacted]`. A prefix is whole path segments ending in `/`: pass `None` in
+`NewRegistryCredential::repository_prefix` for the whole registry, which a
+returned `RegistryCredential` reports as an empty string. `remove` refuses an
+id that is not a UUID with `InvalidArgument` before sending a request.
+
+```rust
+use boxlite::runtime::NewRegistryCredential;
+
+let registries = runtime.images()?.registries()?;
+let login = registries
+    .create(&NewRegistryCredential {
+        registry_host: "ghcr.io".into(),
+        repository_prefix: Some("acme/".into()),
+        username: "acme-bot".into(),
+        password: std::env::var("GHCR_TOKEN")?,
+    })
+    .await?;
+for login in registries.list().await? {
+    println!("{}/{} as {}", login.registry_host, login.repository_prefix, login.username);
+}
+registries.remove(&login.id).await?;
 ```
 
 ### BoxliteOptions
@@ -187,6 +271,56 @@ pub struct LiteBox {
 }
 ```
 
+#### SSH control
+
+`LiteBox::ssh()` returns an owned, cloneable `SshHandle` without starting the box.
+Only `configure()` uses the implicit-start guard of exec, metrics, and file
+copying. `Configured` and `Stopped` boxes using image defaults can start implicitly.
+With an explicit `BoxOptions.cmd` or `entrypoint`, configuration returns
+`InvalidState` in these states; call `start()` first. `status()` and `disable()`
+never start the VM or main command: valid `Configured` and `Stopped` handles return
+disabled status with generation zero and empty address and host identity fields.
+Running handles use the existing guest, including after attach before start or
+runtime recovery. Other lifecycle states return `InvalidState`. These observations
+do not prevent concurrent configuration. The REST backend returns `Unsupported`.
+
+| Method | Signature |
+|--------|-----------|
+| Configure | `async fn configure(&self, config: SshConfig) -> BoxliteResult<SshStatus>` |
+| Query | `async fn status(&self) -> BoxliteResult<SshStatus>` |
+| Disable | `async fn disable(&self) -> BoxliteResult<SshStatus>` |
+
+These types are exported directly from `boxlite`, independently of protobuf:
+
+| Type | Public fields |
+|------|---------------|
+| `SshConfig` | `listen_address: String`, `host_private_key: String`, `accounts: Vec<SshAccount>` |
+| `SshAccount` | `login: String`, `authorized_keys: Vec<String>`, `ca: Option<SshCaConfig>` |
+| `SshCaConfig` | `public_key: String`, `principal: String` |
+| `SshStatus` | `enabled: bool`, `generation: u64`, `listen_address: String`, `host_public_key: String`, `host_key_fingerprint: String` |
+
+Configuration fields are explicit; the runtime neither generates keys nor stores
+configuration nor publishes ports. All types are `Clone + Debug + Send + Sync`;
+configuration Debug output redacts credentials, and status supports `PartialEq + Eq`.
+
+After VM and container startup, each operation has a total 15-second budget:
+the guest's 10-second cleanup limit plus 5 seconds for communication and scheduling.
+Obtaining the SSH interface, connection setup, queueing, and the RPC consume this
+same budget, so delays can leave less than 10 seconds for guest cleanup.
+Runtime shutdown rejects new operations and cancels interface acquisition and RPCs.
+In-progress VM initialization finishes before cancellation is returned, preserving
+recovery of detached boxes; container startup retains its own cancellation.
+Operations are not retried. Cancellation/timeout cannot guarantee
+rollback. Invalidated handles return `Stopped`; drop all references to the old box
+and use `runtime.get()` to obtain a fresh handle for restart. Recovered stopped
+boxes with an explicit main command still require `start()` before `configure()`. Guest
+`InvalidArgument`, `FailedPrecondition`, and `Unimplemented` map to `InvalidArgument`, `InvalidState`, and `Unsupported`; other RPC failures,
+including guest `DeadlineExceeded`, map to `BoxliteError::Rpc` and retain operation
+and gRPC status context. Missing response status is `Internal`.
+
+See the [SSH guide](../../guides/ssh.md) for an implicit-start example,
+validation, reconfiguration, disable, and generation semantics.
+
 #### Methods
 
 | Method | Signature | Description |
@@ -194,6 +328,7 @@ pub struct LiteBox {
 | `id` | `fn id(&self) -> &BoxID` | Get box ID |
 | `name` | `fn name(&self) -> Option<&str>` | Get optional box name |
 | `info` | `async fn info(&self) -> Result<BoxInfo>` | Get box info (no VM init) |
+| `ssh` | `fn ssh(&self) -> SshHandle` | Control local SSH; only configure may implicitly start the box |
 | `network` | `fn network(&self) -> NetworkHandle` | Get box-scoped tunnel operations |
 | `start` | `async fn start(&self) -> BoxliteResult<()>` | Start the box |
 | `run` | `async fn run(&self, command: BoxCommand) -> BoxliteResult<Execution>` | Run command |
@@ -289,8 +424,11 @@ pub struct PublishedPort {
 ```
 
 `network: None` means network information is unavailable, such as metadata from
-an older or remote producer. Within `NetworkInfo`, `published_ports: None`
-means the current handle does not know the lifecycle's publications.
+a REST server that predates the `network` field. A current server reports both
+directions for a remote box, so `info().network` carries the cloud box's
+outbound and inbound policy. Within `NetworkInfo`, `published_ports: None`
+means the current handle does not know the lifecycle's publications, which is
+always the case over REST: host bindings never travel on the wire.
 `Some(vec![])` means there are no active publications, and a populated vector
 contains concrete active local bindings. `PortSpec` remains the request type;
 resolved output uses `PublishedPort` so every reported host port is concrete.
@@ -381,7 +519,7 @@ pub struct BoxState {
 | Inspect | `BoxTunnel::uri(&self) -> Option<&str>` | Read the prepared public URL; `None` for a local box |
 | Descriptor | `BoxConnection::raw_fd(&self) -> Option<RawFd>` | Borrowed fd; `None` for a remotely served connection |
 | Take fd | `BoxConnection::into_fd(self) -> BoxliteResult<OwnedFd>` | Consume the connection and own its descriptor |
-| Connect | `BoxTunnel::connect(self) -> BoxliteResult<BoxConnection>` | Consume the prepared tunnel into its byte stream |
+| Connect | `async fn BoxTunnel::connect(self) -> BoxliteResult<BoxConnection>` | Consume the prepared tunnel into its byte stream |
 | Split | `BoxConnection::into_split(self) -> (BoxReader, BoxWriter)` | Halves that read and write concurrently |
 | Half-close | `BoxWriter::shutdown(&mut self) -> BoxliteResult<()>` | Signal EOF; a peer that already hung up is success, not an error |
 
@@ -589,6 +727,9 @@ pub struct BoxOptions {
     /// Volume mounts
     pub volumes: Vec<VolumeSpec>,
 
+    /// Typed mounts, beside `volumes`
+    pub mounts: Vec<MountSpec>,
+
     /// Network policy, per direction
     pub network: NetworkSpec,
 
@@ -747,6 +888,55 @@ The two origins are not interchangeable across runtimes:
 | `VolumeSpec::managed_volume` | rejected — no volume backend | mounted |
 | `VolumeSpec::bind_mount` | mounted | rejected — the path is the server's, not yours |
 
+### MountSpec
+
+A typed mount for `BoxOptions::mounts`. Where a `VolumeSpec` infers its origin
+from which field is set, a `MountSpec` states it in `mount_type`.
+
+```rust
+pub struct MountSpec {
+    /// `MountType::Volume` or `MountType::Bind`; serialized as `"type"`.
+    pub mount_type: MountType,
+
+    /// A volume id or name for `Volume`, a host path for `Bind`; required by both.
+    pub source: Option<String>,
+
+    /// Mount point inside the box; an absolute path.
+    pub target: String,
+
+    /// Mount as read-only
+    pub read_only: bool,
+
+    /// `Volume` only: a prefix to mount instead of the whole volume.
+    pub sub_path: Option<String>,
+}
+```
+
+```rust
+use boxlite::runtime::options::MountSpec;
+
+let prefix = MountSpec {
+    read_only: true,
+    sub_path: Some("foo/bar".to_string()),
+    ..MountSpec::volume_mount("run42", "/workspace")
+};
+let bind = MountSpec::bind_mount("/tmp/data", "/data");
+```
+
+`MountType` parses from and displays as `"volume"` and `"bind"` exactly. Only
+the Rust `BoxOptions` carries a `MountSpec`; no CLI flag, other SDK or REST
+request does yet.
+`MountSpec::validate` refuses a relative `target`, a missing `source`,
+`sub_path` on a `Bind`, and an empty `sub_path`; create runs it for every mount.
+A runtime refuses the mounts it does not take rather than dropping them; use
+`volumes` where it takes none:
+
+- REST runtimes take no typed mounts yet.
+
+- The local runtime takes no typed mounts yet.
+
+- Importing an archive that carries mounts is not supported yet.
+
 ### NetworkSpec
 
 Guest egress policy — unchanged by the outbound/inbound split.
@@ -764,14 +954,15 @@ pub enum NetworkSpec {
 
 The inbound direction — whether services the box exposes are reachable from
 outside it — is the sibling field `BoxOptions::inbound_network`, which reuses
-this same type: `Enabled` = reachable (the default), `Disabled` = private.
-The two directions are independent, so a box may refuse egress while the
-services it exposes stay reachable, or the reverse.
+this same type: `Enabled` = reachable, `Disabled` = unreachable (the default,
+`NetworkSpec::disabled()`). The two directions are independent, so a
+box may refuse egress while the services it exposes stay reachable, or the
+reverse.
 
 ```rust
 let opts = BoxOptions {
     network: NetworkSpec::Disabled,                                  // no egress
-    inbound_network: NetworkSpec::Enabled { allow_net: vec![] },     // still reachable
+    inbound_network: NetworkSpec::Enabled { allow_net: vec![] },     // reachable
     ..Default::default()
 };
 ```
@@ -781,7 +972,7 @@ allowlist yet, so a non-empty value is rejected at create. Inbound is
 controlled by enabled/disabled alone.
 
 Pre-split code needs no change: `network` keeps its name, type and meaning,
-and box configs persisted without `inbound_network` load with it defaulted.
+and box configs persisted without `inbound_network` load with it `Disabled`.
 
 ### NetworkRateLimit
 
@@ -1201,7 +1392,7 @@ pub enum BoxliteError {
     /// Unsupported operation
     Unsupported(String),
 
-    /// Box not found
+    /// The named box, image, volume or snapshot does not exist
     NotFound(String),
 
     /// Resource already exists

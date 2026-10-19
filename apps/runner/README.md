@@ -1,3 +1,7 @@
+## TL;DR
+
+One runner service manages many BoxLite VMs and exposes their lifecycle, execution, files and telemetry.
+
 # BoxLite Runner
 
 The runner is the Go HTTP server that fronts a single `BoxliteRuntime` (the
@@ -6,9 +10,9 @@ API for SDK clients and the control-plane API. One runner process hosts many
 boxes; each box hosts many executions; each execution can be attached to at
 most one client at a time.
 
-Production deployment runs on bare EC2 (see
-[`apps/infra/sst.config.ts`](../infra/sst.config.ts)), listening on `:3003`
-behind the NestJS API service.
+Cloud deployment runs on Compute Engine or EC2 with nested KVM, listening on `:3003`
+behind the control-plane API. See [infrastructure architecture](../infra/docs/architecture.md)
+and [runner operations](../infra/docs/runners.md).
 
 For the system-wide context (CDN, load balancers, where the runner fits in
 the request path), see [`apps/README.md`](../README.md).
@@ -109,8 +113,13 @@ the in-process TTL caches under `pkg/cache/`.
 `cmd/runner/main.go` brings up the process in this order:
 
 1. **BoxLite runtime** is initialized via `boxlite.NewClient(...)`. This
-   loads the Rust core, opens `~/.boxlite/`, and is the single shared
-   handle to the VM hypervisor.
+   loads the Rust core, opens the BoxLite home, and is the single shared
+   handle to the VM hypervisor. The client resolves the home the way
+   boxlite-core would — `BOXLITE_HOME_DIR`, else `$BOXLITE_HOME`, else
+   `.boxlite` under `$HOME` (or the passwd home when `$HOME` is unset) —
+   passes it to core explicitly, and exposes it as `HomeDir()`, so the
+   rest of the runner (migration staging under `<home>/migrate`) reads the
+   same directory as the runtime.
 2. **Service singletons** are constructed and stashed on the
    `runner.GetInstance(...)` global: `BoxService`, `BackupInfoCache`,
    `ArtifactErrorCache`, `metrics.Collector`. Controllers later read them
@@ -154,6 +163,13 @@ crash handling live in the runtime, not the runner.
 | `POST` | `/boxes/:id/network-settings` | `UpdateNetworkSettings` | Set block-all / allow-list |
 | `POST` | `/boxes/:id/backup` | `CreateBackup` | Kick off async backup; updates `BackupInfoCache` |
 | `GET` | `/boxes/:id` | `Info` | Combined state + backup state + runtime version |
+
+`Create` and `Recover` take the outbound network policy as
+`outboundEnabled` and an `outboundAllowNet` entry list. `outboundEnabled` is
+required: a body without it, such as a job queued by an API that predates it,
+is rejected as an invalid argument before the runner mounts volumes, creates
+a box, or (for `Recover`) destroys the old one
+(`networkSpec` in [`pkg/boxlite/client.go`](pkg/boxlite/client.go)).
 
 `Info` is the only endpoint that fans out: it pulls live state from the
 runtime _and_ backup state from `BackupInfoCache`, then fetches the
@@ -437,8 +453,9 @@ durations, and network counters. All values come from
 `/info` combines:
 
 - A snapshot from `metrics.Collector.Collect(ctx)` — host CPU load
-  average, CPU/mem/disk %, summed allocated CPU/RAM/disk across running
-  boxes, artifact count, started box count.
+  average, CPU/mem %, summed allocated CPU/RAM across running boxes,
+  disk usage of the BoxLite home's filesystem, artifact count, started
+  box count.
 - `runner.InspectRunnerServices(ctx)` — pings the BoxLite runtime with
   a 2 s timeout and reports `boxlite: healthy|<err>`.
 
@@ -486,10 +503,16 @@ independent loops:
   smoothed CPU % without re-sampling on each request.
 - **Allocated resources snapshot** every
   `AllocatedResourcesSnapshotInterval` — queries `Boxlite.ListInfo()`
-  and sums the CPU/RAM/disk allocations across running boxes.
+  and sums the CPU/RAM allocations across running boxes.
 
 `Collect(ctx)` reads the current values with a short timeout and is
-called from both `/info` and the v2 healthcheck.
+called from both `/info` and the v2 healthcheck. Disk numbers come from
+one statfs of the filesystem holding the BoxLite home (`HomeDir()`),
+which is where boxes, images and bases live: `TotalDiskGiB` is its size,
+`DiskUsagePercentage` its use (`df`'s Use%), and `AllocatedDiskGiB` its
+used space (`df`'s Used) — not a sum of the boxes' requested sizes. A
+filesystem reporting zero capacity is an error, so the API never
+receives a `diskGiB` of 0.
 
 ### v2 job poller + executor
 
@@ -589,9 +612,15 @@ Optional features are toggled by env vars:
 - `BOXLITE_API_VERSION=2` — spawn the long-poll + healthcheck loops.
 - `BOXLITE_MAX_SESSION_LIFETIME`, `BOXLITE_RECONNECT_GRACE`,
   `BOXLITE_SHUTDOWN_GRACE` — exec reaping timers.
+- `REGISTRY_PROXY_HOST`, `REGISTRY_PROXY_USERNAME`, `REGISTRY_PROXY_PASSWORD` —
+  pull an image whose registry credentials only the platform holds through the
+  [registry proxy](../image-service/README.md). The password is this runner's own
+  API key, so with a host set it defaults to `BOXLITE_RUNNER_TOKEN`, and the
+  username to `runner`. A proxy host also listed in `INSECURE_REGISTRIES` is
+  reached over HTTP.
 
-The runner is normally bootstrapped by the SST EC2 user-data script;
-see `apps/infra/stack/runners.ts:buildRunnerUserData`. For local
+Cloud hosts use the [shared runner boot logic](../infra/mdeploy/stack/runner-boot.ts)
+with cloud-specific providers; the retained AWS stack has its own bootstrap path. For local
 development against the Rust SDK directly, see `boxlite serve` at
 [`src/cli/src/commands/serve/`](../../src/cli/src/commands/serve/)
 (Rust REST server with parity coverage).

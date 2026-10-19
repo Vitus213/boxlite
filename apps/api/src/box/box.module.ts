@@ -34,6 +34,7 @@ import { BoxStopAction } from './managers/box-actions/box-stop.action'
 import { BoxDestroyAction } from './managers/box-actions/box-destroy.action'
 import { BoxRepository } from './repositories/box.repository'
 import { RegionModule } from '../region/region.module'
+import { ImageModule } from '../image/image.module'
 import { Region } from '../region/entities/region.entity'
 import { JobController } from './controllers/job.controller'
 import { JobService } from './services/job.service'
@@ -50,15 +51,19 @@ import { BoxLastActivity } from './entities/box-last-activity.entity'
 import { BoxMigration } from './entities/box-migration.entity'
 import { BoxActivityService } from './services/box-activity.service'
 import { BoxStateWaiterService } from './services/box-state-waiter.service'
+import { BoxAutoResumeService } from './services/box-auto-resume.service'
 import { BoxMigrationService } from './services/box-migration.service'
 import { BoxMigrationJobReceiver } from './services/box-migration-job-receiver.service'
+import { Tunnel } from './entities/tunnel.entity'
+import { TunnelService } from './services/tunnel.service'
 
 @Module({
   imports: [
     UserModule,
     OrganizationModule,
     RegionModule,
-    TypeOrmModule.forFeature([Box, Runner, WarmPool, Volume, Region, Job, BoxLastActivity, BoxMigration]),
+    ImageModule,
+    TypeOrmModule.forFeature([Box, Runner, WarmPool, Volume, Region, Job, BoxLastActivity, BoxMigration, Tunnel]),
   ],
   controllers: [BoxController, RunnerController, PreviewController, VolumeController, JobController],
   providers: [
@@ -81,9 +86,11 @@ import { BoxMigrationJobReceiver } from './services/box-migration-job-receiver.s
     BoxActivityService,
     BoxExitCodeService,
     BoxStateWaiterService,
+    BoxAutoResumeService,
     BoxMigrationService,
     BoxMigrationManager,
     BoxMigrationJobReceiver,
+    TunnelService,
     BoxAccessGuard,
     RunnerAccessGuard,
     RegionRunnerAccessGuard,
@@ -101,6 +108,7 @@ import { BoxMigrationJobReceiver } from './services/box-migration-job-receiver.s
   ],
   exports: [
     BoxService,
+    TunnelService,
     RunnerService,
     RedisLockProvider,
     VolumeService,
@@ -109,6 +117,7 @@ import { BoxMigrationJobReceiver } from './services/box-migration-job-receiver.s
     RunnerAdapterFactory,
     BoxActivityService,
     BoxStateWaiterService,
+    BoxAutoResumeService,
   ],
 })
 export class BoxModule {}

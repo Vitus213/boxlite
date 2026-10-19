@@ -35,13 +35,38 @@ import {
   GKE_POD_CIDR,
   GKE_SERVICE_CIDR,
   MANAGED_PROXY_CIDR,
+  CLOUDRUN_EGRESS_CIDR,
+  PRIVATE_GOOGLE_ACCESS_ADDRESSES,
   PSC_NAT_CIDR,
   SUBNET_CIDR,
 } from '../stack/providers/gcp/network.ts'
-import { BOOT_DISK_TYPE, MACHINE as RUNNER_MACHINE } from '../stack/providers/gcp/runners.ts'
+import {
+  DATA_DISK,
+  DATA_DISK_DEVICE,
+  DISK_TYPE as RUNNER_DISK,
+  MACHINE as RUNNER_MACHINE,
+  PREPARE_HOME,
+} from '../stack/providers/gcp/runners.ts'
+import { RUNNER_HOME } from '../stack/runner-boot.ts'
 import { apiPrefixRouteRules } from '../stack/providers/gcp/api.ts'
 import { isMissingNeg } from '../stack/providers/gcp/edge.ts'
 import { instanceFor } from 'naming'
+import {
+  REGISTRY_PROXY_CONTROL_PLANE_VARIABLE,
+  REGISTRY_PROXY_HEALTH_PATH,
+  REGISTRY_PROXY_PORT,
+  REGISTRY_PROXY_PORT_VARIABLE,
+  REGISTRY_PROXY_HOST_VARIABLE,
+  REGISTRY_PROXY_UPSTREAM_HOSTS,
+  REGISTRY_PROXY_UPSTREAM_HOSTS_VARIABLE,
+} from '../stack/registry-proxy.ts'
+import {
+  REGISTRY_SECRET_CREATE_PERMISSIONS,
+  REGISTRY_SECRET_PREFIX,
+  REGISTRY_SECRET_READ_ROLE,
+  REGISTRY_SECRET_WRITE_PERMISSIONS,
+} from '../stack/providers/gcp/registry-credentials.ts'
+import { REGISTRY_SECRET_STORE_VARIABLE } from '../stack/registry-credentials.ts'
 
 /*
  * The committed example, not this machine's stage file.
@@ -58,29 +83,7 @@ process.env.MSTAGE_CONFIG ??= fileURLToPath(new URL('../../.mstage.config.exampl
 const sourceOf = (module: string): string =>
   readFileSync(fileURLToPath(new URL(`../stack/providers/gcp/${module}.ts`, import.meta.url)), 'utf8')
 
-/**
- * Every project-level IAM resource this provider constructs, whichever
- * constructor it uses and however deeply it is nested.
- *
- * Scanning to a balanced close rather than matching a closing line. The first
- * version of this pinned `\n    })`, so it enumerated only blocks that closed
- * at exactly four spaces — a grant one level deeper, which is the shape
- * `RunnerArtifactsRead` already uses in this same file, went unseen and green.
- * `IAMBinding` is included because it is authoritative, and so the more
- * dangerous of the two to leave unbounded.
- *
- * It reads source text, which is the limit worth stating: it can see the
- * argument a constructor is written with, not the resource Pulumi synthesises
- * from it. A grant assembled from a variable would satisfy this and still be
- * unbounded.
- *
- * The scan skips comments and quoted literals, because a parenthesis inside
- * either is prose and not structure — counting them, as the first version did,
- * ends a block wherever someone writes one in a comment. What it still cannot
- * do is tell a regex literal from a division; nothing in these providers writes
- * one, and an unbalanced scan now throws rather than running to the end of the
- * file and returning a block that swallows the next grant's `condition:`.
- */
+/** Where the quoted literal opened at `open` ends, or -1 if it never does. */
 const endOfLiteral = (source: string, open: number): number => {
   const quote = source[open]
   for (let index = open + 1; index < source.length; index += 1) {
@@ -93,9 +96,28 @@ const endOfLiteral = (source: string, open: number): number => {
   return -1
 }
 
-const projectIamBlocks = (source: string): string[] => {
+/**
+ * Every constructor call `opener` matches, each scanned to its balanced close.
+ *
+ * Scanning to a balanced close rather than matching a closing line. The first
+ * version of this pinned `\n    })`, so it enumerated only blocks that closed
+ * at exactly four spaces — a grant one level deeper, which is the shape
+ * `RunnerArtifactsRead` already uses in this same file, went unseen and green.
+ *
+ * It reads source text, which is the limit worth stating: it can see the
+ * argument a constructor is written with, not the resource Pulumi synthesises
+ * from it. A grant assembled from a variable would satisfy this and still be
+ * unbounded.
+ *
+ * The scan skips comments and quoted literals, because a parenthesis inside
+ * either is prose and not structure — counting them, as the first version did,
+ * ends a block wherever someone writes one in a comment. What it still cannot
+ * do is tell a regex literal from a division; nothing in these providers writes
+ * one, and an unbalanced scan throws rather than running to the end of the file
+ * and returning a block that swallows the next grant's `condition:`.
+ */
+const blocksOpenedBy = (source: string, opener: RegExp): string[] => {
   const blocks: string[] = []
-  const opener = /new gcp\.projects\.IAM(?:Member|Binding)\(/g
   for (let match = opener.exec(source); match; match = opener.exec(source)) {
     let depth = 0
     let index = match.index + match[0].length - 1
@@ -127,10 +149,80 @@ const projectIamBlocks = (source: string): string[] => {
         break
       }
     }
-    assert.ok(closed, `the IAM grant at offset ${match.index} never closes, so this scan proves nothing`)
+    assert.ok(closed, `the block at offset ${match.index} never closes, so this scan proves nothing`)
     blocks.push(source.slice(match.index, index + 1))
   }
   return blocks
+}
+
+/**
+ * Every project-level IAM resource this provider constructs, whichever
+ * constructor it uses and however deeply it is nested.
+ *
+ * `IAMBinding` is included because it is authoritative, and so the more
+ * dangerous of the two to leave unbounded.
+ */
+const projectIamBlocks = (source: string): string[] =>
+  blocksOpenedBy(source, /new gcp\.projects\.IAM(?:Member|Binding)\(/g)
+
+/**
+ * The same text with its prose removed.
+ *
+ * An assertion about how a rule is keyed has to read the rule and not the
+ * comment above it. `clickhouse.ts` explains itself by naming
+ * `sourceServiceAccounts` in the very paragraph that says why it no longer uses
+ * one, so a search for the word finds that sentence and reports the defect it
+ * was written to record as still present.
+ *
+ * Unterminated input throws rather than returning what it managed to read, for
+ * the reason `blocksOpenedBy` gives: a negative assertion over truncated text
+ * passes because the text stopped, not because the property is absent. A
+ * trailing `//` with no newline is the one benign end, and ends the scan.
+ */
+const withoutComments = (source: string): string => {
+  let stripped = ''
+  for (let index = 0; index < source.length; index += 1) {
+    const pair = source.slice(index, index + 2)
+    if (pair === '//') {
+      const newline = source.indexOf('\n', index)
+      if (newline === -1) break
+      index = newline - 1
+      continue
+    }
+    if (pair === '/*') {
+      const end = source.indexOf('*/', index + 2)
+      assert.notEqual(end, -1, `the block comment at offset ${index} never closes, so this strip proves nothing`)
+      index = end + 1
+      continue
+    }
+    const character = source[index] as string
+    if (character === "'" || character === '"' || character === '`') {
+      const end = endOfLiteral(source, index)
+      assert.notEqual(end, -1, `the literal at offset ${index} never closes, so this strip proves nothing`)
+      stripped += source.slice(index, end + 1)
+      index = end
+      continue
+    }
+    stripped += character
+  }
+  return stripped
+}
+
+/**
+ * One firewall rule as it is written, with its prose stripped — so an assertion
+ * about how it is keyed cannot be satisfied by a different rule in the same
+ * file, nor by a comment explaining the keying it no longer uses.
+ *
+ * The whole point of scoping it. A file-wide search for a property name answers
+ * for whichever rule happens to use it — `gcp/network.ts` holds five, and three
+ * of them name a service account deliberately — so an assertion written that
+ * way either passes on a neighbour's spelling or fails on one it never meant.
+ */
+const firewallBlock = (source: string, resource: string): string => {
+  const named = new RegExp(`^new gcp\\.compute\\.Firewall\\(\\s*'${resource}'`)
+  const blocks = blocksOpenedBy(source, /new gcp\.compute\.Firewall\(/g).filter((block) => named.test(block))
+  assert.equal(blocks.length, 1, `expected exactly one ${resource}, found ${blocks.length}`)
+  return withoutComments(blocks[0] as string)
 }
 
 /**
@@ -587,32 +679,139 @@ test('the collector is invocable from the network, and the ingress is the whole 
   assert.equal(/GOOGLE_ID_TOKEN/.test(sourceOf('runners') + sourceOf('edge')), false)
 })
 
-test('the telemetry database admits every identity that speaks to it, not just the writer', () => {
+test('the telemetry database admits both of its callers, because both egress from one range', () => {
   /*
-   * The collector writes and the API reads, and the rule is keyed on service
-   * accounts — so an identity left out of it is *dropped* rather than refused:
-   * the reader gets a connect timeout against a database that is plainly
-   * running, ClickHouse logs nothing because nothing arrived, and the explicit
-   * deny at 65534 is the only trace. The composition root used to hand over the
-   * collector's account alone while the comment beside it said both, and no
-   * stage caught it because the one GCP stage keeps `CLICKHOUSE_MODE=disabled`.
+   * The collector writes and the API reads, and a caller left out of the rule is
+   * *dropped* rather than refused: the reader gets a connect timeout against a
+   * database that is plainly running, ClickHouse logs nothing because nothing
+   * arrived, and the explicit deny at 65534 is the only trace. The composition
+   * root used to hand over the collector alone while the comment beside it said
+   * both, and no stage caught it because the one GCP stage keeps
+   * `CLICKHOUSE_MODE=disabled`.
    *
-   * The roles are recorded as the bundle asks the network for them, so this
-   * fails when the wiring stops asking rather than when a string moves.
+   * What closes that hole is the subnet rather than a list. Both callers are
+   * Cloud Run services and both egress from `CLOUDRUN_EGRESS_CIDR`, so one range
+   * names both and there is no list left to hand over half of. The property that
+   * has to hold moves with it: a role recorded as `cloud-run` is placed in that
+   * subnet and admitted, and a role that becomes a Cloud Run service without
+   * being recorded there would egress from the workload subnet and be dropped.
    */
-  const asked: string[] = []
+  /*
+   * Both callers read the egress subnet, and only on the interface their packets
+   * leave through.
+   *
+   * `egressSubnetwork` is a second field rather than a different value for
+   * `subnetwork` because that one also places the API's internal address — the
+   * address the runners call the API on. Answering both questions with one field
+   * moved that address into the range this rule names as a source, replaced it,
+   * and widened the rule to whatever landed there next. A deploy is what found
+   * it: the apply replaced `ApiInternalAddress` and `ApiInternalForwardingRule`.
+   */
+  assert.match(sourceOf('api'), /networkInterfaces: \[\{ subnetwork: placement\.egressSubnetwork \}\]/)
+  assert.match(sourceOf('collector'), /networkInterfaces: \[\{ subnetwork: placement\.egressSubnetwork \}\]/)
+  // And nothing else reads it, so the address stays beside its clients — and
+  // the registry proxy, a Cloud Run service that calls no VM, stays out of the
+  // range the runner and ClickHouse rules admit.
+  for (const module of ['api', 'collector', 'runners', 'clickhouse', 'edge', 'registry-proxy']) {
+    const reads = (sourceOf(module).match(/placement\.egressSubnetwork/g) ?? []).length
+    assert.equal(reads, module === 'api' || module === 'collector' ? 1 : 0, `${module} reads egressSubnetwork ${reads}x`)
+  }
+
+  /*
+   * And the chain between the two ends holds.
+   *
+   * The rule names a constant, the subnet is built from that same constant, and
+   * the placement hands out that subnet — three links, and the assertions above
+   * only pin the outer two. Repointing `egressSubnetwork` at the workload subnet
+   * leaves every one of them green and restores the 504 this exists to prevent,
+   * which is what the old `tagFor` assertions caught by spelling both ends with
+   * one function.
+   */
+  const networkModule = sourceOf('network')
+  assert.match(networkModule, /ipCidrRange: CLOUDRUN_EGRESS_CIDR/)
+  assert.match(networkModule, /egressSubnetwork: cloudRunEgress\.id/)
+  // And the range handed to the rule is that subnet's, not the workload one's.
+  assert.match(sourceOf('index'), /callerRanges: \[CLOUDRUN_EGRESS_CIDR\]/)
+
+  /*
+   * And building the module asks the network for no caller at all.
+   *
+   * This is what the old bug cannot survive: the caller list used to be read
+   * role by role off the placement, which is how the composition root came to
+   * hand over the collector alone while the comment beside it said both. A range
+   * the network module owns leaves nothing per-caller to look up, so anything
+   * read here again would be a list growing back.
+   */
+  const consulted: string[] = []
   const network = {
     binding: { cloud: 'gcp', network: 'net', subnetwork: 'subnet' },
-    placementFor: (role: string) => {
-      asked.push(role)
-      return { cloud: 'gcp', serviceAccount: `${role}@example.iam.gserviceaccount.com` }
-    },
+    placementFor: (role: string) => ({
+      cloud: 'gcp',
+      get serviceAccount() {
+        consulted.push(`${role}:serviceAccount`)
+        return `${role}@example.iam.gserviceaccount.com`
+      },
+      get subnetwork() {
+        consulted.push(`${role}:subnetwork`)
+        return 'subnet'
+      },
+      // Instrumented because it is the field this change added: a caller list
+      // rebuilt from it would otherwise read an untracked property and leave the
+      // assertion below green while the list grew back.
+      get egressSubnetwork() {
+        consulted.push(`${role}:egressSubnetwork`)
+        return 'egress-subnet'
+      },
+    }),
     ready: [],
   } as any
   gcpBundle().clickhouse({ network })
-  assert.deepEqual([...asked].sort(), ['api', 'otel-collector'])
-  // And the rule is keyed on the whole list it was handed rather than one of it.
-  assert.match(sourceOf('clickhouse'), /sourceServiceAccounts: callers/)
+  assert.deepEqual(consulted, [])
+})
+
+test('a Cloud Run service reaches a VM by source range, because tags do not reach an ingress rule', () => {
+  /*
+   * The 504 this pins, and the trap that replaced it.
+   *
+   * `sourceServiceAccounts` matches traffic from VM instances; a Cloud Run
+   * service reaching the network through direct VPC egress is attributed to no
+   * account at all, so a rule keyed that way admits nothing and the deny at
+   * 65534 takes the SYN. The control plane's `/v1/boxes/*` routes — exec, files,
+   * metrics — then time out after a full TCP connect against a runner that is
+   * healthy, answering the GKE proxy on the same port, and logging nothing.
+   *
+   * A source tag does not fix that: Google lists "network tags or service
+   * identity in ingress firewall rules" together among the things direct VPC
+   * egress does not support, so a tag swaps one unmatched selector for another.
+   * Measured on dev on 2026-09-23 by changing only this rule's source — identity
+   * alone gave 504 after a 127.5s connect timeout, and adding the range the API
+   * egresses from gave 201 in 0.52s. The supported source is that range.
+   *
+   * With the source a range the target may be an account again — Google refuses
+   * only a source *tag* paired with a target service account — so both rules
+   * name their host the way the other three rules in `gcp/network.ts` do.
+   */
+  const runner = firewallBlock(sourceOf('network'), 'RunnerFirewall')
+  assert.match(runner, /sourceRanges: \[CLOUDRUN_EGRESS_CIDR\]/)
+  assert.match(runner, /targetServiceAccounts: \[accounts\.runner\.email\]/)
+
+  const clickhouse = firewallBlock(sourceOf('clickhouse'), 'ClickHouseFirewall')
+  assert.match(clickhouse, /sourceRanges: callerRanges/)
+  assert.match(clickhouse, /targetServiceAccounts: \[host\.email\]/)
+
+  // Neither rule keeps a tag on either end.
+  assert.equal(/Tags/.test(runner), false)
+  assert.equal(/Tags/.test(clickhouse), false)
+
+  /*
+   * And nothing still carries one for these rules to key on: the two Cloud Run
+   * interfaces stamped it, the two hosts answered to it, and the placement
+   * spelled it. A tag left behind after this is a selector nothing reads, which
+   * is how the unsupported one survived a review in the first place.
+   */
+  for (const module of ['api', 'collector', 'runners', 'clickhouse', 'network']) {
+    assert.equal(/networkTag/.test(sourceOf(module)), false, `${module} still carries a network tag`)
+  }
 })
 
 /** The script as a host gets it, with three secret versions already resolved. */
@@ -719,7 +918,7 @@ test('the hosts may read the staged binary, and only while one is being installe
   assert.match(source, /role: 'roles\/storage\.objectViewer'/)
   assert.match(source, /resource\.name\.startsWith\("projects\/_\/buckets\/\$\{artifactsBucket\}\/objects\/runner\/"\)/)
   // And the host waits for it: a boot script that fetched before the binding
-  // existed would download nothing, and that boot never happens again.
+  // existed would download nothing, and nothing retries it until the host restarts.
   assert.match(source, /dependsOn: \[\.\.\.dependsOn, \.\.\.staged\]/)
 })
 
@@ -766,7 +965,7 @@ test('the upgrade policy selects hosts by the label those hosts actually carry',
 
 test('a host that cannot be told the new control-plane name is converged to it', () => {
   /*
-   * `BOXLITE_API_URL` is written once, at first boot. `metadataStartupScript`
+   * `BOXLITE_API_URL` is written by the boot script, which never changes. `metadataStartupScript`
    * is in `ignoreChanges` and the instance is protected, so a stage that
    * changes its domain strands every host it already has: the public record is
    * renamed, the private zone is rebuilt under the new name, and the old one
@@ -840,6 +1039,28 @@ test('every Cloud SQL size names its edition beside its tier', () => {
   }
 })
 
+test('each database size still names the tier its stages were sized against', () => {
+  /*
+   * A size is a name a stage declares, and the name lives outside this
+   * repository — in each stage's GitHub Environment. So a respelt tier here is
+   * not a compile error anywhere: the stage keeps declaring what it declared,
+   * and the next apply moves its database. The edition check above passes any
+   * spelling that pairs correctly, which is every spelling.
+   *
+   * `standard` was added rather than `small` being redefined, precisely so no
+   * existing declaration changed meaning. Pinning the pairs is what keeps that
+   * true.
+   */
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(DATABASE_MACHINE).map(([size, machine]) => [size, machine.tier])),
+    {
+      small: 'db-f1-micro',
+      standard: 'db-g1-small',
+      medium: 'db-custom-2-7680',
+    },
+  )
+})
+
 test('the instance is told to log connections, so a silent Postgres means something', () => {
   /*
    * Cloud SQL terminates TLS at the instance front end, so a failed handshake
@@ -909,7 +1130,7 @@ test('every runner size is a family that can nest, and none is one that cannot',
 test('the boot disk is the one N4 attaches, and no Persistent Disk is asked for', () => {
   // N4 does not take Persistent Disk at all, so `pd-balanced` is a create-time
   // refusal rather than a slower disk.
-  assert.equal(BOOT_DISK_TYPE, 'hyperdisk-balanced')
+  assert.equal(RUNNER_DISK, 'hyperdisk-balanced')
   assert.equal(sourceOf('runners').includes("'pd-"), false)
 })
 
@@ -921,7 +1142,7 @@ test('every GCE host in the bundle names a machine family and a disk that pair',
    * disk rather than the family that cannot take it.
    */
   const hosts = [
-    { module: 'runners', machines: Object.values(RUNNER_MACHINE), disk: BOOT_DISK_TYPE },
+    { module: 'runners', machines: Object.values(RUNNER_MACHINE), disk: RUNNER_DISK },
     { module: 'clickhouse', machines: Object.values(CLICKHOUSE_MACHINE), disk: CLICKHOUSE_DISK },
   ]
   for (const { module, machines, disk } of hosts) {
@@ -933,10 +1154,74 @@ test('every GCE host in the bundle names a machine family and a disk that pair',
   }
 })
 
+test('every runner size states a data disk GCP will create and its machine can use', () => {
+  /*
+   * Hyperdisk Balanced bounds a disk's IOPS by its size and its throughput by its
+   * IOPS, and refuses a create outside them; an N4 caps what all of its Hyperdisk
+   * can draw together, and anything stated above that is billed and never reached.
+   * docs.cloud.google.com/compute/docs/disks/hd-types/hyperdisk-balanced and
+   * .../disks/hyperdisk-perf-limits.
+   */
+  const CAP: Record<string, { iops: number; throughputMiBps: number }> = {
+    'n4-standard-4': { iops: 30_000, throughputMiBps: 240 },
+    'n4-standard-8': { iops: 30_000, throughputMiBps: 480 },
+    'n4-standard-16': { iops: 80_000, throughputMiBps: 1_200 },
+  }
+  for (const [size, machine] of Object.entries(RUNNER_MACHINE)) {
+    const disk = DATA_DISK[size as keyof typeof DATA_DISK]
+    assert.ok(disk, `${size} has no data disk`)
+    const cap = CAP[machine]
+    assert.ok(cap, `no Hyperdisk cap is recorded for ${machine}`)
+    assert.ok(
+      disk.iops >= 3_000 && disk.iops <= Math.min(500 * disk.sizeGb, 160_000),
+      `${size}: ${disk.iops} IOPS is out of bounds for ${disk.sizeGb} GiB`,
+    )
+    assert.ok(
+      disk.throughputMiBps >= Math.max(140, disk.iops / 256) && disk.throughputMiBps <= Math.min(2_400, disk.iops / 4),
+      `${size}: ${disk.throughputMiBps} MiB/s is out of bounds for ${disk.iops} IOPS`,
+    )
+    assert.ok(
+      disk.iops <= cap.iops && disk.throughputMiBps <= cap.throughputMiBps,
+      `${size} states more than ${machine} can draw`,
+    )
+  }
+})
+
+test('a runner keeps box state on a disk no deploy shrinks, replaces or detaches', () => {
+  /*
+   * A disk grown online reads back larger than the size the code states: the
+   * provider replaces a disk whose size went down, and `protect` turns that into
+   * an error. The attachment is fixed at create because the provider applies any
+   * edit to one by detaching the disk from the running host.
+   */
+  const source = sourceOf('runners')
+  const disks = blocksOpenedBy(source, /new gcp\.compute\.Disk\(/g).map(withoutComments)
+  assert.equal(disks.length, 1, `expected one data disk per host, found ${disks.length}`)
+  const disk = disks[0] as string
+  assert.match(disk, /ignoreChanges: \['size', 'provisionedIops', 'provisionedThroughput'\]/)
+  assert.match(disk, /protect: true/)
+  assert.match(disk, /type: DISK_TYPE/)
+  assert.match(disk, /name: runnerDataDiskNameFor\(/)
+  const instances = blocksOpenedBy(source, /new gcp\.compute\.Instance\(/g).map(withoutComments)
+  assert.equal(instances.length, 1, `expected one host constructor, found ${instances.length}`)
+  const instance = instances[0] as string
+  assert.match(instance, /attachedDisks: \[\{ source: dataDisk\.id, deviceName: DATA_DISK_DEVICE \}\]/)
+  assert.match(instance, /ignoreChanges: \[[^\]]*'attachedDisks'[^\]]*\]/)
+})
+
+test('a host mounts the disk it was given, at the home the runner reads', () => {
+  // One device name for the attachment and the mount, one home for the mount
+  // and the runner: a second spelling of either is a host that never finds its
+  // disk, or a runner that writes beside it.
+  assert.match(PREPARE_HOME, new RegExp(`^DATA_DEVICE='/dev/disk/by-id/google-${DATA_DISK_DEVICE}'$`, 'm'))
+  assert.match(PREPARE_HOME, new RegExp(`^DATA_HOME='${RUNNER_HOME}'$`, 'm'))
+  assert.match(withoutComments(sourceOf('runners')), /prepareHome: PREPARE_HOME,/)
+})
+
 test('no minCpuPlatform is asked of a family that has exactly one', () => {
   // The floor N2 needed. On N4 naming an older platform is rejected rather than
   // read as a minimum already met. The argument, not the prose: the comment
-  // above `BOOT_DISK_TYPE` says why it is gone, and should keep saying so.
+  // above `DISK_TYPE` says why it is gone, and should keep saying so.
   assert.equal(/^\s*minCpuPlatform:/m.test(sourceOf('runners')), false)
 })
 
@@ -1280,7 +1565,7 @@ test('the fixed GKE and proxy ranges neither overlap nor collide with Private Se
    * allocator. Moving either constant out of that `/16`, or letting the two
    * subnets overlap, breaks the argument silently and the deploy months later.
    */
-  const cidrs = [SUBNET_CIDR, MANAGED_PROXY_CIDR, PSC_NAT_CIDR, GKE_POD_CIDR, GKE_SERVICE_CIDR]
+  const cidrs = [SUBNET_CIDR, CLOUDRUN_EGRESS_CIDR, MANAGED_PROXY_CIDR, PSC_NAT_CIDR, GKE_POD_CIDR, GKE_SERVICE_CIDR]
   for (const [index, leftCidr] of cidrs.entries()) {
     for (const rightCidr of cidrs.slice(index + 1)) {
       const left = rangeOf(leftCidr)
@@ -1294,6 +1579,56 @@ test('the fixed GKE and proxy ranges neither overlap nor collide with Private Se
       slash16(cidr),
       slash16(SUBNET_CIDR),
       `${cidr} sits in a /16 the workload subnet does not block, so the allocator may take it`,
+    )
+  }
+})
+
+test('run.app answers privately, through Private Google Access', () => {
+  /*
+   * The silence this replaces: the collector's `run.app` name is a public
+   * address, `ingress: internal` is an ACL at Google's front end rather than a
+   * private endpoint, and the API reaches it with `PRIVATE_RANGES_ONLY` egress
+   * — which leaves a public destination on Cloud Run's own path. So every OTLP
+   * export from the API is refused with a 404 while the service looks healthy.
+   */
+  const source = sourceOf('network')
+
+  // Private, and bound to this network. A zone left public would divert
+  // `run.app` for readers far outside it.
+  assert.match(source, /dnsName: RUN_APP_ZONE,/)
+  assert.match(source, /visibility: 'private',/)
+  assert.match(source, /privateVisibilityConfig: \{ networks: \[\{ networkUrl: network\.id \}\] \}/)
+
+  // The apex carries the addresses and the wildcard points at the apex, which is
+  // the shape the Private Google Access guide prescribes for `run.app`.
+  assert.match(source, /name: RUN_APP_ZONE,\n\s+type: 'A',/)
+  assert.match(source, /rrdatas: PRIVATE_GOOGLE_ACCESS_ADDRESSES,/)
+  assert.match(source, /name: `\*\.\$\{RUN_APP_ZONE\}`,\n\s+type: 'CNAME',\n\s+ttl: 60,\n\s+rrdatas: \[RUN_APP_ZONE\],/)
+
+  // The addresses only answer through the network if the subnets the callers
+  // leave from have Private Google Access; both do, and both must keep it.
+  const withGoogleAccess = (source.match(/privateIpGoogleAccess: true,/g) ?? []).length
+  assert.equal(withGoogleAccess, 2, 'the workload subnet and the Cloud Run egress subnet both need Private Google Access')
+
+  // And workloads wait for the records, or one that starts early resolves the
+  // public address and keeps it for as long as its resolver caches it.
+  assert.match(source, /ready: \[\n\s+privateServiceAccess,\n(?:\s+\/\/.*\n)*\s+\.\.\.runAppRecords,/)
+})
+
+test('the run.app addresses are the private.googleapis.com range', () => {
+  /*
+   * `private.googleapis.com` is `199.36.153.8/30`, and the Private Google Access
+   * guide lists `*.run.app` on its row. An address outside that range is not a
+   * Private Google Access address at all, so `PRIVATE_RANGES_ONLY` would leave
+   * the API on its public path while the zone looked correct.
+   */
+  const privateRange = rangeOf('199.36.153.8/30')
+  const addresses = PRIVATE_GOOGLE_ACCESS_ADDRESSES.map((address) => rangeOf(`${address}/32`).first)
+  assert.equal(new Set(addresses).size, 4, 'all four private.googleapis.com addresses, once each')
+  for (const address of addresses) {
+    assert.ok(
+      address >= privateRange.first && address <= privateRange.last,
+      `${address} is outside private.googleapis.com (199.36.153.8/30)`,
     )
   }
 })
@@ -1326,11 +1661,11 @@ test('the ClickStack publication is named what the console looks for', () => {
   assert.match(source, /enableProxyProtocol: false/)
 })
 
-test('the publication admits the two kinds of traffic that carry no service account', () => {
+test('the publication admits the two kinds of traffic that come from outside its neighbour range', () => {
   /*
-   * `clickhouse.ts`'s rule keys on service accounts, which is exact and covers
-   * every caller inside this network. Neither packet here carries one: a health
-   * probe originates in Google's own infrastructure, and a consumer's
+   * `clickhouse.ts`'s rule keys on the range its callers egress from, which
+   * covers every caller inside this network. Neither packet here comes from it:
+   * a health probe originates in Google's own infrastructure, and a consumer's
    * connection has been translated into the NAT range on the way in. Without
    * both ranges the backend never turns healthy and the console reaches
    * nothing — with every resource created and the deploy green.
@@ -1418,4 +1753,186 @@ test('the runner is fenced off one address, not off the internet, and only once 
   assert.match(source, /targetServiceAccounts: \[runnerAccount\]/)
   assert.equal(/destinationRanges: \['0\.0\.0\.0\/0'\]/.test(source), false, 'the deny covers the internet')
   assert.match(source, /\{ dependsOn: \[internalForwarding, internalRecord\] \}/)
+})
+
+// ── the registry proxy ──────────────────────────────────────────────────────
+
+test('the registry proxy is invocable by everyone, because its callers cannot carry an identity', () => {
+  /*
+   * A caller here is the runtime pulling an image, and the registry protocol's
+   * own Authorization header already carries the runner's Basic credential.
+   * There is no second header for a Google identity token, so a named invoker
+   * authorises nothing that ever calls — every service account reaches it and
+   * the runtime that matters is refused 403.
+   */
+  assert.match(sourceOf('registry-proxy'), /member: 'allUsers'/)
+})
+
+test('and its ingress is internal, which is the other half of that pair', () => {
+  /*
+   * With everyone as invoker, the ingress is the whole restriction. Widening it
+   * is a one-word edit that puts an authenticated relay on the internet, and no
+   * type or apply would object.
+   */
+  const ingress = /ingress: '([A-Z_]+)'/.exec(sourceOf('registry-proxy'))?.[1]
+  assert.ok(ingress, 'the registry proxy declares no ingress at all')
+  assert.ok(
+    ['INGRESS_TRAFFIC_INTERNAL_ONLY', 'INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER'].includes(ingress),
+    `allUsers may invoke the registry proxy and its ingress is ${ingress}; that pair is a public relay`,
+  )
+})
+
+test('the registry proxy may stream a response for an hour', () => {
+  /*
+   * A blob is one response and a large layer takes minutes. Cloud Run's default
+   * request deadline is five, and a pull cut off there fails with a truncated
+   * body rather than a timeout the runtime could recognise and retry.
+   */
+  assert.match(sourceOf('registry-proxy'), /timeout: '3600s'/)
+})
+
+test('the registry proxy is spoken to over HTTP/2', () => {
+  /*
+   * Cloud Run caps an HTTP/1 response at 32 MiB unless it is chunked, and a
+   * blob relayed with the upstream's own Content-Length is not. Over HTTP/1
+   * every layer past that size fails here and nowhere else — locally, in every
+   * test, it streams fine.
+   */
+  assert.match(sourceOf('registry-proxy'), /ports: \[\{ name: 'h2c', containerPort: REGISTRY_PROXY_PORT \}\]/)
+})
+
+test('the registry proxy runs as its own account, not the control plane’s', () => {
+  /*
+   * What it holds differs from what the API holds: it is the one process that
+   * reads registry credentials. An account shared with the API would hand the
+   * control plane that read too.
+   */
+  const index = readFileSync(fileURLToPath(new URL('../stack/providers/gcp/index.ts', import.meta.url)), 'utf8')
+  const wiring = /registryProxy: \(\{ network, dependsOn(?:, \w+)* \}\) =>[\s\S]*?\}\),/.exec(index)?.[0]
+  assert.ok(wiring, 'the GCP bundle wires no registry proxy')
+  assert.match(wiring, /placement: placement\(network, 'registry-proxy'\)/)
+  assert.doesNotMatch(wiring, /placement\(network, 'api'\)/)
+})
+
+test('the registry proxy’s contract matches the binary it deploys', () => {
+  /*
+   * The port, the control-plane variable and the health route are said twice:
+   * once in `stack/registry-proxy.ts`, once in the Go binary they describe.
+   * Each language checks its own half, and nothing checks that the halves
+   * agree — so a default changed on one side deploys a revision that never
+   * passes its first probe, or one that asks no control plane at all.
+   */
+  const service = fileURLToPath(new URL('../../../image-service/', import.meta.url))
+  const config = readFileSync(`${service}cmd/registry-proxy/config/config.go`, 'utf8')
+  const server = readFileSync(`${service}internal/proxy/server.go`, 'utf8')
+
+  assert.match(
+    config,
+    new RegExp(`envconfig:"${REGISTRY_PROXY_PORT_VARIABLE}" default:"${REGISTRY_PROXY_PORT}"`),
+    `the binary does not listen on ${REGISTRY_PROXY_PORT} by default under ${REGISTRY_PROXY_PORT_VARIABLE}`,
+  )
+  assert.match(
+    config,
+    new RegExp(`envconfig:"${REGISTRY_PROXY_CONTROL_PLANE_VARIABLE}"`),
+    `the binary does not read its control plane from ${REGISTRY_PROXY_CONTROL_PLANE_VARIABLE}`,
+  )
+  assert.match(
+    server,
+    new RegExp(`HealthPath = "${REGISTRY_PROXY_HEALTH_PATH}"`),
+    `the binary serves no health route at ${REGISTRY_PROXY_HEALTH_PATH}`,
+  )
+})
+
+test('the API can write registry passwords and cannot read one back', () => {
+  /*
+   * The API's half of the read/write split, as the permissions it is given.
+   * `versions.access` is the read. `setIamPolicy` would let it grant itself
+   * that read. `secrets.delete` would skip the seven days a destroyed version
+   * waits before the password is gone. None of the three may appear, and
+   * nothing beyond the three it calls may either.
+   */
+  const granted = [...REGISTRY_SECRET_CREATE_PERMISSIONS, ...REGISTRY_SECRET_WRITE_PERMISSIONS].sort()
+  assert.deepEqual(granted, [
+    'secretmanager.secrets.create',
+    'secretmanager.versions.add',
+    'secretmanager.versions.destroy',
+  ])
+
+  // Read out of each grant's own block, for the reason the runner test gives.
+  const grants = projectIamBlocks(withoutComments(sourceOf('api')))
+  const grantNamed = (suffix: string): string => {
+    const found = grants.filter((block) => block.includes(`ApiCapability\${index}${suffix}\``))
+    assert.equal(found.length, 1, `expected one ${suffix} grant, found ${found.length}`)
+    return found[0]
+  }
+  assert.match(grantNamed('Write'), /role: writeRole,[\s\S]*condition,/, 'the version writes are not bounded')
+  assert.doesNotMatch(grantNamed('Create'), /condition/, 'a create is authorized before the name exists')
+
+  assert.match(
+    sourceOf('registry-credentials'),
+    /resource\.name\.startsWith\("projects\/\$\{projectNumber\}\/secrets\/\$\{REGISTRY_SECRET_PREFIX\}"\)/,
+    'the condition no longer bounds the grant to the credentials\' secrets',
+  )
+})
+
+test('the API names its secrets and its store the way the stack grants them', () => {
+  /*
+   * The prefix and the store's variable are said twice, once here and once in
+   * the API. A prefix changed on one side leaves every write refused; a
+   * variable renamed on one side leaves private registries off with the grant
+   * still in place.
+   */
+  const api = fileURLToPath(new URL('../../../api/src/', import.meta.url))
+  const store = readFileSync(`${api}registry/stores/secret.store.ts`, 'utf8')
+  const configuration = readFileSync(`${api}config/configuration.ts`, 'utf8')
+
+  assert.match(store, new RegExp(`REGISTRY_SECRET_PREFIX = '${REGISTRY_SECRET_PREFIX}'`))
+  assert.match(configuration, new RegExp(`process\\.env\\.${REGISTRY_SECRET_STORE_VARIABLE}\\b`))
+  assert.match(store, /backend === 'gcp'/, 'the API no longer answers to the value the stack writes')
+})
+
+test('the registry proxy can read registry passwords and write none', () => {
+  /*
+   * The proxy's half of the split. `secretAccessor` is reading and nothing
+   * else; any other role here is a write the API's half was built to keep
+   * from a single process. Bound by the same prefix condition, so the stack's
+   * own secrets — the database password among them — stay out of reach.
+   */
+  assert.equal(REGISTRY_SECRET_READ_ROLE, 'roles/secretmanager.secretAccessor')
+
+  const grants = projectIamBlocks(withoutComments(sourceOf('registry-proxy')))
+  assert.equal(grants.length, 1, `expected the one read grant, found ${grants.length}`)
+  assert.match(grants[0], /role: registryCredentials\.binding\.readRole,/)
+  assert.match(grants[0], /condition: registryCredentials\.binding\.condition,/, 'the read is not bounded')
+})
+
+test('the proxy, the API and the runner read the same registries and the same host', () => {
+  /*
+   * Said four times: here, in the proxy's config, in the API's fallback, and
+   * in the runner's config. The stack writes both variables, so the defaults
+   * matter where it writes nothing — a local stack — and a mismatch there is a
+   * login the API accepts for a registry the proxy then refuses.
+   */
+  const service = fileURLToPath(new URL('../../../image-service/', import.meta.url))
+  const api = fileURLToPath(new URL('../../../api/src/', import.meta.url))
+  const runner = fileURLToPath(new URL('../../../runner/', import.meta.url))
+  // The hosts are compared as text, never built into a pattern: an unescaped
+  // `.` in `us.gcr.io` would also match `usXgcr.io`.
+  const proxyDefault = readFileSync(`${service}cmd/registry-proxy/config/config.go`, 'utf8').match(
+    new RegExp(`envconfig:"${REGISTRY_PROXY_UPSTREAM_HOSTS_VARIABLE}" default:"([^"]*)"`),
+  )
+  assert.equal(proxyDefault?.[1], REGISTRY_PROXY_UPSTREAM_HOSTS.join(','))
+  const apiProxy = readFileSync(`${api}registry/utils/registry-proxy.util.ts`, 'utf8')
+  assert.match(apiProxy, new RegExp(`'${REGISTRY_PROXY_UPSTREAM_HOSTS_VARIABLE}'`))
+  // However the formatter wraps the array: the same hosts, in the same order.
+  const fallback = apiProxy.match(/FALLBACK_CREDENTIALED_HOSTS = \[([^\]]*)\]/)
+  assert.deepEqual(
+    [...(fallback?.[1] ?? '').matchAll(/'([^']*)'/g)].map((quoted) => quoted[1]),
+    REGISTRY_PROXY_UPSTREAM_HOSTS,
+  )
+  assert.match(apiProxy, new RegExp(`'${REGISTRY_PROXY_HOST_VARIABLE}'`))
+  assert.match(
+    readFileSync(`${runner}cmd/runner/config/config.go`, 'utf8'),
+    new RegExp(`envconfig:"${REGISTRY_PROXY_HOST_VARIABLE}"`),
+  )
 })

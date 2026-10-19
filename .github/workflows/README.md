@@ -1,3 +1,7 @@
+## TL;DR
+
+Use this index to find CI checks, artifact publication and deployment workflows, with infrastructure procedures linked to their runbook.
+
 # CI/CD workflows
 
 Every GitHub Actions workflow in the repository: the pull-request checks, the SDK build and
@@ -18,13 +22,14 @@ RELEASE CHAIN (workflow_run)            build-c ──▶ build-go
                                                 └──▶ build-runner-binary
 
 RELEASE (release event)                 build-runtime · build-c · build-node · build-wheels
+                                        mbuild-release-on-release ──▶ mbuild-release (images, dev)
                                         apps/box-images/v* tag ──▶ release-box-images
 
-DEPLOY (manual dispatch)                deploy-infra ─┬─▶ build-apps-api-image
+LEGACY AWS (manual dispatch)            deploy-infra ─┬─▶ build-apps-api-image
                                                       ├─▶ build-c ──▶ build-runner-binary
                                                       └─▶ e2e-cloud
                                         deploy-release   (no builds; consumes published artifacts)
-                                        mdeploy-all ─┬─▶ mbuild         (a commit or #<n> ──▶ <sha> images, dev)
+DEPLOY (manual dispatch)                mdeploy-all ─┬─▶ mbuild         (a commit or #<n> ──▶ <sha> images, dev)
                                                      └─▶ mbuild-release (v<X.Y.Z> ──▶ v<X.Y.Z>-<sha>, dev then prod)
 
 CONFIG                                  ci-config action ◀── lint, test, config workflow
@@ -43,7 +48,7 @@ own.
 | `lint.yml` | push, PR, merge_group | — | Format and lint per language, plus the installer smoke test. `Lint (conclusion)` is the required check |
 | `test.yml` | push, PR, merge_group, weekly, dispatch | — | Lightweight draft checks; SDK tests and combined Rust/CLI coverage on ready PRs. Compact routine matrices and full weekly/manual matrices. Codecov requires 90% patch coverage |
 | `codeql.yml` | push, PR, dispatch, weekly | — | CodeQL advanced setup, so fork PRs are scanned |
-| `api-client-drift.yml` | PR | — | Fails if the committed generated clients no longer match their specs |
+| `api-client-drift.yml` | PR | — | Fails if the committed generated clients no longer match their specs. It regenerates through the `generate:api-client` targets, `apps/hack` post-steps included, so regenerate with those targets rather than the bare generator |
 | `author-review.yml` | PR (target), issue_comment, merge_group | — | Converts unacknowledged PRs to draft, posts author instructions, and publishes `Author reviewed the PR` on the current head. Merge queues carry forward the required PR admission check |
 | `build-runtime.yml` | weekly, release, dispatch | — | Builds runtime/CLI artifacts and populates sccache together; publishes crates on release |
 | `build-c.yml` | release, dispatch, `workflow_call` | yes | C SDK archives |
@@ -51,13 +56,14 @@ own.
 | `build-node.yml` | release, dispatch | — | Node.js SDK, napi-rs addon and platform packages |
 | `build-wheels.yml` | release, dispatch | — | Builds Python wheels and verifies their native extension in cibuildwheel before publishing |
 | `build-runner-binary.yml` | `workflow_run`, dispatch, `workflow_call` | yes | Linux amd64 runner binary; automatic builds follow successful C SDK releases |
-| `build-apps-api-image.yml` | dispatch, `workflow_call` | yes | The `apps/api` image: build a commit, build a release, or promote one between stages. Retiring alongside `deploy-infra` |
-| `deploy-infra.yml` | dispatch | — | Builds and deploys one commit to a stage. The incumbent, retiring after the first green `mdeploy-all` dispatch |
-| `deploy-release.yml` | dispatch | — | Deploys already-published artifacts for one `X.Y.Z`. Compiles nothing. Retiring alongside `deploy-infra` |
-| `e2e-cloud.yml` | dispatch, `workflow_call` | yes | End-to-end against a deployed stage. Run by `deploy-infra` after it applies |
-| `mdeploy-all.yml` | dispatch | — | The only rollout path. A commit SHA builds for dev, and so does `#<number>` — a pull request, by the commit it would merge to; a release tag publishes into dev or promotes to prod, and is all prod accepts. Applies the stack itself |
+| `build-apps-api-image.yml` | dispatch, `workflow_call` | yes | The `apps/api` image: build a commit, build a release, or promote one between stages. Retained legacy AWS path |
+| `deploy-infra.yml` | dispatch | — | Builds and deploys one commit to a stage. Retained legacy AWS path |
+| `deploy-release.yml` | dispatch | — | Deploys already-published artifacts for one `X.Y.Z`. Compiles nothing. Retained legacy AWS path |
+| `e2e-cloud.yml` | dispatch, `workflow_call` | yes | End-to-end against a deployed stage: the whole suite on `dev`, `-m smoke` on `prod`. Run by `deploy-infra` after it applies, or dispatched with a `stage` |
+| `mdeploy-all.yml` | dispatch | — | Current mdeploy orchestration for prepared GCP/AWS stages. A commit SHA builds for dev, and so does `#<number>` — a pull request, by the commit it would merge to; a release tag publishes into dev or promotes to prod, and is all prod accepts. Applies the stack itself |
 | `mbuild.yml` | `workflow_call` | call-only | The commit line's images, for a dev rollout. Callee only: nobody publishes a commit by hand |
 | `mbuild-release.yml` | dispatch, `workflow_call` | yes | The release line's images, tagged `v<X.Y.Z>-<sha>`: publish a version into dev, or promote it to prod. One job per artifact, and a version the target already holds is refused rather than skipped |
+| `mbuild-release-on-release.yml` | release | — | A stable published release dispatches `mbuild-release` from `main` to publish its application images into dev |
 | `e2e-local.yml` | push, `pull_request_target`, dispatch | — | VM-based tests on a self-hosted EC2 runner. Needs `/dev/kvm`; PRs need the `e2e-local` label |
 | `build-box-images.yml` | PR, push, dispatch | — | Builds changed flavors for both arches; shared inputs and manual runs build every flavor |
 | `release-box-images.yml` | `apps/box-images/v*` tag, dispatch | — | The only workflow that writes to GHCR |
@@ -93,12 +99,40 @@ and bypass change filters. Combined Rust and CLI coverage runs on all three plat
 non-VM integration tests and Linux guest tests. Codecov requires 90% coverage of changed lines
 and reports total coverage.
 
+`make coverage:bindings:external` runs `make test:unit:scripts` before collecting
+native SDK profiles. A relative `CARGO_TARGET_DIR` is resolved from the repository
+root once, so Python and Node builds share the report's object directory.
+
+Linux x64 also runs the native KVM hardware tests and adds their profiles before
+the Rust coverage upload. Missing `/dev/kvm` access fails this qualification.
+
+`Dashboard Tests` runs the dashboard's vitest suite on one Linux runner and
+uploads v8 coverage under the `dashboard` flag. `@nx/vite` infers the project's
+`test` target from the `test` block in `apps/dashboard/vite.config.mts`; without
+that block the target does not exist, nothing runs the suite, and a
+dashboard-only change reaches Codecov with no report — which the patch status
+rejects as a missing report rather than as low coverage. Specs choose their own
+environment with a `// @vitest-environment jsdom` pragma.
+
 When none of the coverage suites is selected on a PR or merge group, the
 `Codecov (no coverage changes)` job runs a validated `empty-upload`. Codecov
 checks the changed files before publishing a passing or failing status; the
 workflow never forces a pass. Failed file detection cannot select this path,
 and upload errors fail `Test (conclusion)`. Source changes still need reports
 and 90% patch coverage; missing reports fail the patch status.
+
+Plugin resources, `scripts/plugins`, `tests/plugins`, and their Make/CI inputs select
+the lightweight `Plugin package coverage` job, including on drafts. It measures
+package tests and real check/dist commands through `make plugin:boxlite:coverage`,
+saves the Cobertura XML as the `plugin-coverage` artifact, and uploads it with OIDC
+under the `plugins` carryforward flag. Selected plugin source cannot take the
+empty-upload path; package or upload failures block `Test (conclusion)`.
+
+The package validator requires onboarding to name a distributed, frontmatter-validated
+`skills/<name>/SKILL.md` inventory. Excluded caches and shipped reference files cannot
+serve as onboarding skills, even when both manifests name the same existing file or alias.
+Each onboarding regression restores original manifest bytes and removes its invalid resource
+before the next case, so leftover invalid state cannot mask a later failure.
 
 After verifying normal uploads and the skipped-coverage path on PRs and merge
 groups, require `codecov/patch` from the Codecov app in the main ruleset alongside
@@ -251,48 +285,38 @@ silently stops the chain — no error, the downstream workflow simply never fire
 
 ## Adding a stage
 
-`stage` inputs are allowlists rather than free text, so a required-reviewers Environment cannot be
-targeted by an unbootstrapped or misspelled name. Each list is independent — it names the stages
-*that* path is meant to reach. Today `deploy-infra.yml` lists `dev`, while `deploy-release.yml` and
-`build-apps-api-image.yml` (`stage` and `source_stage`) list `dev` and `prod`. Bootstrapping a
-stage means adding it to whichever lists should reach it.
+Define the stage in `.mstage.config.json`, bootstrap its intended cloud/path, and publish its declaration
+with `npm run mstage config put -- --stage <stage>`. The GitHub Environment name must match the stage.
 
-Two edits, not one: the lists above, and `ENVIRONMENTS` in
-`apps/infra/deployment/release-safety.test.ts`, which is what refuses an option with no deployment
-Environment behind it. An Environment is where a stage's declaration lives, so an option naming a
-stage that has none reaches a job with no configuration at all rather than a clear refusal.
+Manual workflow choices are allowlists: mdeploy-all currently exposes `dev` and `prod`, with distinct
+commit/release policies. A new stage requires reviewing dispatch choices, ref-resolution/promotion
+policy and the associated workflow tests, including `apps/infra/deployment/release-safety.test.ts`.
+Declaring a stage locally does not make every workflow accept it.
 
-The `m*` workflows read that stage's declaration rather than anything written here, so adding one
-to their lists is the whole change on this side — but the declaration has to be somewhere they can
-read it. `npm run mstage config put -- --stage <stage>` puts it in that stage's Environment, and
-`.github/actions/setup-infra` restores it on the runner. A promotion reads two stages and a job
-binds to one Environment, so the source's block is read by a job bound to the source's Environment
-and carried to the other as an output — which is why `mbuild.yml` and `mbuild-release.yml`
-each have a small job that only reads the source stage.
-
-Each stage also needs its GitHub Environment to exist under exactly the stage name — the deploy
-role's trust policy pins `repo:<owner>/<repo>:environment:<stage>` — and that is where required
-reviewers are enforced.
+Promotion needs both source and destination declarations. The source job reads its own Environment
+and carries the declaration to the destination job; setup-infra restores the needed blocks.
+Verify live reviewers and cloud federation trust after bootstrap. For retained legacy workflows,
+review their independent `stage`/`source_stage` choices and capability checks as well.
 
 ## Deploy configuration
 
-Per stage, on the GitHub side:
+The current [deployment runbook](../../apps/infra/docs/deployment.md) owns setup and apply instructions.
+Stage declarations travel through `BOXLITE_MSTAGE_BOXLITE_APP_CONFIG` on the matching GitHub Environment;
+[setup-infra](../actions/setup-infra/action.yml) restores the ignored `.mstage.config.json` for each job.
 
-- **Environment variables** `AWS_ACCOUNT_ID` and `AWS_REGION`. Neither can live in the stage's SST
-  secret store, because `configure-aws-credentials` reads them before any AWS credentials exist.
-  - `AWS_ACCOUNT_ID` is **required**. The workflows compose
-    `arn:aws:iam::<id>:role/boxlite-<stage>-github-deploy` from it; only the account id is unknown,
-    since the role name follows from the stage.
-  - `AWS_REGION` is **optional**, and only for a stage outside the default. The workflows fall back
-    to `DEFAULT_AWS_REGION`, pinned to the code by a test.
-- **Environment secrets** `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_DEFAULT_ACCOUNT_ID`. These cannot
-  move to the SST secret store either: reading that store initializes the Cloudflare provider, so a
-  token kept there would be needed in order to read itself.
+| Cloud/path | GitHub inputs established by bootstrap |
+| --- | --- |
+| GCP | `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOYER`, `GCP_IMAGE_PUBLISHER` Environment variables |
+| AWS | `AWS_ACCOUNT_ID`, `AWS_REGION` Environment variables for federated credentials |
+| Legacy AWS wrapper | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_DEFAULT_ACCOUNT_ID` Environment secrets |
 
-Everything else for a stage lives in its SST secret store, seeded by `npm run bootstrap` and read
-by `apps/infra/deployment/sst.ts`. `npm run bootstrap` also reconciles the scoped role, permissions
-boundary, immutable API ECR repository and private runner artifact bucket, from the documents in
-`apps/infra/bootstrap/aws/`.
+mdeploy reads application values from the encrypted stage store through mstage. The retained legacy
+AWS wrapper uses its SST manifest and bootstrap credential copies. AWS bootstrap still prepares
+legacy `boxlite` resources while mdeploy names `boxlite-app`; read the
+[compatibility boundary](../../apps/infra/bootstrap/aws/README.md#aws-mdeploy-compatibility) before switching.
+
+[Configuration](../../apps/infra/docs/configuration.md) explains groups, digests and secret handling;
+[security](../../apps/infra/docs/security.md) distinguishes workflow gates from live IAM and Environment settings.
 
 ## Publishing secrets
 

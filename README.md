@@ -122,7 +122,7 @@ Installs to `$HOME/.local/bin/boxlite`, runtime embedded — no extra setup. Alt
 
 ```bash
 boxlite serve
-# Listening on 0.0.0.0:8100
+# Listening on 127.0.0.1:8100 (add --host 0.0.0.0 --api-key "$KEY" to expose it)
 ```
 
 ```bash
@@ -139,17 +139,13 @@ REST-capable CLI commands also work against a running server with `--url`:
 ### 4 · Distribute it — your own agentic cloud
 
 <details>
-<summary>Deploy the control plane into your own AWS account (GCP on the way) — multi-tenant, autoscaling boxes for a fleet of agents. The substrate at full scale.</summary>
+<summary>Deploy into your own AWS account or GCP project, with a shared control plane and a fleet of VM runners.</summary>
 
-```bash
-git clone https://github.com/boxlite-ai/boxlite && cd boxlite/apps/infra
-npm install
-npm run login                          # browser sign-in: AWS, GitHub, Auth0
-npm run bootstrap -- --stage prod      # IAM role, GitHub Environment, secrets
-npm run deploy -- --stage prod
-```
-
-Needs an AWS account, a Cloudflare-managed domain, and Docker. Full guide → [`apps/infra/README.md`](./apps/infra/README.md).
+Start with the [architecture graphs](./apps/infra/docs/architecture.md), then follow the
+[deployment guide](./apps/infra/docs/deployment.md) for stage configuration, bootstrap, preview
+and verification. Choose the [AWS guide](./apps/infra/docs/aws/README.md) or
+[GCP guide](./apps/infra/docs/gcp/README.md) for provider-specific setup, operations and costs.
+Neither cloud is preferred; the stage declaration selects the provider.
 
 </details>
 

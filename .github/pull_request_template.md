@@ -1,14 +1,24 @@
-## Summary
-
-<!-- Explain the problem and result. Use bullets, a real example, a table,
-call graph, sequence diagram, or short prose—whichever is clearest.
-These headings are optional. No diagram or source annotation is required.
+<!-- Read and apply
+[boxlite-writing](https://github.com/boxlite-ai/agent-tooling/blob/main/plugins/boxlite-agent-tooling/.agents/skills/boxlite-writing/SKILL.md)
+to the PR description, including drafts and revisions.
+Follow the contributor guide before filling in this template:
+https://github.com/boxlite-ai/boxlite/blob/main/CONTRIBUTING.md#commit--pr-messages
 Keep the whole body within 120 words, with no paragraph over 80 and no list
-item over 40. No walls of text. -->
+item over 40. -->
+
+## TL;DR
+
+<!-- Summarize the intended result. -->
+
+Design doc: <!-- Full registered URL. -->
+
+Documentation: <!-- Link meaningful project docs added or updated in this PR;
+prefer existing docs. -->
+
+## How it works
+
+<!-- Describe the mechanism or rationale. -->
 
 ## Verification
 
-<!-- Decisive command → observed result. Keep material risks, failures, and untested
-behavior visible. Link detailed evidence; do not paste logs or file inventories.
-For a fix, briefly report the observed failure with all production changes reverted
-and the pass with the complete fix restored. Link an issue if applicable. -->
+<!-- Decisive command → observed result, including red/green evidence for a fix. -->

@@ -96,7 +96,7 @@ test('the prefix this refuses to vary is the one the API actually names', () => 
 })
 
 test('a size no provider answers to is refused here rather than at the apply', () => {
-  assert.throws(() => parse({ database: { ...valid.database, size: 'enormous' } }), /must be one of small, medium/)
+  assert.throws(() => parse({ database: { ...valid.database, size: 'enormous' } }), /must be one of small, standard, medium/)
   assert.throws(() => parse({ runners: { size: 'tiny', rootDiskGb: 100 } }), /must be one of small, medium, large/)
 })
 
@@ -164,6 +164,7 @@ test('the stages differ where they are meant to, and each says so in full', () =
   assert.equal(blockFor('dev').database.protected, false, 'dev is deletable')
   assert.equal(blockFor('dev2').clickhouse.mode, 'disabled')
   assert.equal(blockFor('dev2').runners.size, 'small', 'the GCP stage runs a smaller fleet than AWS dev')
+  assert.equal(blockFor('dev2').runners.rootDiskGb, 50, 'a GCP boot disk holds the OS and the runner; boxes live on the data disk')
   assert.equal(blockFor('dev').storage.versioning, true)
   assert.equal(blockFor('dev').runners.rootDiskGb, 100)
   assert.equal(blockFor('dev').runners.size, 'large', 'a runner has to be a machine family that can nest')

@@ -33,7 +33,9 @@ use boxlite::{
 use crate::cli::GlobalFlags;
 use crate::defaults::{LOCAL_SERVE_HOST, LOCAL_SERVE_PORT};
 
-use self::types::{BoxResponse, CreateBoxRequest, ErrorBody, ErrorDetail, ExecRequest};
+use self::types::{
+    BoxResponse, CreateBoxRequest, ErrorBody, ErrorDetail, ExecRequest, NetworkInfoResponse,
+};
 
 fn parse_api_key(raw: &str) -> Result<String, String> {
     if raw.is_empty() {
@@ -1116,6 +1118,7 @@ fn box_info_to_response(info: &BoxInfo) -> BoxResponse {
         auto_delete: info.auto_delete,
         auto_resume: info.auto_resume,
         exit_code: info.exit_code,
+        network: info.network.as_ref().map(NetworkInfoResponse::from),
     }
 }
 
@@ -1172,7 +1175,7 @@ fn build_box_options(req: &CreateBoxRequest) -> Result<BoxOptions, boxlite::Boxl
                     inbound.mode.parse::<NetworkMode>()?,
                     inbound.allow_net.clone(),
                 ),
-                None => (NetworkMode::Enabled, Vec::new()),
+                None => (NetworkMode::Disabled, Vec::new()),
             };
             (
                 NetworkSpec::try_from(OutboundNetworkConfig { mode, allow_net })?,
@@ -1182,7 +1185,7 @@ fn build_box_options(req: &CreateBoxRequest) -> Result<BoxOptions, boxlite::Boxl
                 })?,
             )
         }
-        None => (NetworkSpec::default(), NetworkSpec::default()),
+        None => (NetworkSpec::default(), NetworkSpec::disabled()),
     };
 
     // SecurityOptions is deliberately NOT client-configurable over
@@ -1426,6 +1429,43 @@ async fn record_activity(State(state): State<Arc<AppState>>, req: Request, next:
         state.record_box_activity(&box_id).await;
     }
     next.run(req).await
+}
+
+/// Whether `host` can only be reached from this machine. Anything that is not
+/// a loopback IP or `localhost` (including `0.0.0.0`, `::` and other
+/// hostnames) counts as network-reachable.
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Refuse to expose the unauthenticated API beyond loopback: without a key,
+/// every caller gets full box control (exec, files, secrets).
+fn check_bind_auth(host: &str, api_key: Option<&str>) -> anyhow::Result<()> {
+    if api_key.is_none() && !is_loopback_host(host) {
+        return Err(unauthenticated_bind_error(host));
+    }
+    Ok(())
+}
+
+/// Same rule against the address the listener actually bound. `localhost`
+/// passes [`check_bind_auth`] by name, but the resolver may map it elsewhere.
+fn check_bound_addr(addr: std::net::SocketAddr, api_key: Option<&str>) -> anyhow::Result<()> {
+    if api_key.is_none() && !addr.ip().is_loopback() {
+        return Err(unauthenticated_bind_error(addr));
+    }
+    Ok(())
+}
+
+fn unauthenticated_bind_error(target: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!(
+        "refusing to bind `boxlite serve` to non-loopback address {target} without an API key; \
+         set --api-key (or BOXLITE_SERVE_API_KEY), or bind to 127.0.0.1"
+    )
 }
 
 /// Auth middleware: thin axum adapter over [`auth_allows`]. 401 in the
@@ -1751,7 +1791,9 @@ async fn get_or_attach_main_session(
 // ============================================================================
 
 fn build_router(state: Arc<AppState>) -> Router {
-    use handlers::{advanced, boxes, config, executions, files, me, metrics, snapshots, volumes};
+    use handlers::{
+        advanced, boxes, config, executions, files, images, me, metrics, snapshots, volumes,
+    };
 
     Router::new()
         // Identity (no tenant prefix)
@@ -1767,6 +1809,18 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/volumes/{id}",
             get(volumes::get_volume).delete(volumes::remove_volume),
+        )
+        // Images (usage first — static path before param path)
+        .route("/v1/images", get(images::list_images))
+        .route("/v1/images/usage", get(images::image_usage))
+        .route(
+            "/v1/images/{name}",
+            get(images::get_image).delete(images::remove_image),
+        )
+        .route("/v1/images/{name}/aliases", post(images::create_image_alias))
+        .route(
+            "/v1/images/{name}/aliases/{alias}",
+            axum::routing::delete(images::delete_image_alias),
         )
         // Box CRUD (import first — static path before param path)
         .route("/v1/boxes/import", post(advanced::import_box))
@@ -1884,6 +1938,8 @@ fn build_router(state: Arc<AppState>) -> Router {
 // ============================================================================
 
 pub async fn execute(args: ServeArgs, global: &GlobalFlags) -> anyhow::Result<()> {
+    check_bind_auth(&args.host, args.api_key.as_deref())?;
+
     // A server owns an embedded runtime. Client connection settings must not
     // turn it into a proxy merely because a credential profile or REST URL is
     // present in the environment.
@@ -1906,6 +1962,7 @@ pub async fn execute(args: ServeArgs, global: &GlobalFlags) -> anyhow::Result<()
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind((args.host.as_str(), args.port)).await?;
     let addr = listener.local_addr()?;
+    check_bound_addr(addr, args.api_key.as_deref())?;
 
     tracing::info!("boxlite serve listening on {}", addr);
     eprintln!("BoxLite REST API server listening on http://{addr}");
@@ -1949,6 +2006,59 @@ mod tests {
         assert!(!auth_allows(Some("k"), "/v1/me", Some("wrong")));
         assert!(!auth_allows(Some("k"), "/v1/me", None));
         assert!(!auth_allows(Some("k"), "/v1/boxes", Some("")));
+    }
+
+    #[test]
+    fn default_host_is_loopback() {
+        assert!(is_loopback_host(LOCAL_SERVE_HOST));
+        assert!(check_bind_auth(LOCAL_SERVE_HOST, None).is_ok());
+    }
+
+    #[test]
+    fn check_bind_auth_allows_loopback_without_key() {
+        for host in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "::1",
+            "[::1]",
+            "localhost",
+            "LOCALHOST",
+        ] {
+            assert!(check_bind_auth(host, None).is_ok(), "{host}");
+        }
+    }
+
+    #[test]
+    fn check_bind_auth_rejects_network_bind_without_key() {
+        for host in ["0.0.0.0", "::", "[::]", "192.168.1.10", "example.com", ""] {
+            assert!(check_bind_auth(host, None).is_err(), "{host}");
+        }
+    }
+
+    #[test]
+    fn check_bound_addr_rejects_resolved_network_addr_without_key() {
+        for addr in ["127.0.0.1:8100", "[::1]:8100"] {
+            assert!(
+                check_bound_addr(addr.parse().unwrap(), None).is_ok(),
+                "{addr}"
+            );
+        }
+        for addr in ["192.168.1.10:8100", "0.0.0.0:8100", "[::]:8100"] {
+            assert!(
+                check_bound_addr(addr.parse().unwrap(), None).is_err(),
+                "{addr}"
+            );
+            assert!(
+                check_bound_addr(addr.parse().unwrap(), Some("k")).is_ok(),
+                "{addr}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_bind_auth_allows_network_bind_with_key() {
+        assert!(check_bind_auth("0.0.0.0", Some("k")).is_ok());
+        assert!(check_bind_auth("::", Some("k")).is_ok());
     }
 
     #[test]
@@ -2232,6 +2342,46 @@ mod tests {
             resp.auto_resume,
             "auto_resume is forwarded to the runtime, so it is read off the info"
         );
+    }
+
+    /// The read-back must carry the policy the runtime holds, both
+    /// directions, so a remote `info()` or `inspect` can show it; and only
+    /// that, since host bindings mean nothing to a remote caller.
+    #[test]
+    fn a_box_response_carries_the_network_policy_and_nothing_local() {
+        let mut info = info_as_the_runtime_reports_it("running");
+        info.network = serde_json::from_value(serde_json::json!({
+            "outbound": { "mode": "enabled", "allow_net": ["api.openai.com"] },
+            "inbound": { "mode": "enabled" },
+            "published_ports": [
+                { "guest_port": 80, "host_ip": "127.0.0.1", "host_port": 8080, "protocol": "tcp" }
+            ],
+        }))
+        .ok();
+
+        let network = serde_json::to_value(box_info_to_response(&info))
+            .expect("serializable")
+            .get("network")
+            .cloned()
+            .expect("the policy must be on the wire");
+        assert_eq!(
+            network,
+            serde_json::json!({
+                "outbound": { "mode": "enabled", "allow_net": ["api.openai.com"] },
+                "inbound": { "mode": "enabled", "allow_net": [] },
+            })
+        );
+    }
+
+    /// A runtime that does not know the policy must not be reported as any
+    /// particular one: the field is left out, which the client reads as
+    /// unknown.
+    #[test]
+    fn a_box_with_unknown_network_omits_the_field() {
+        let mut info = info_as_the_runtime_reports_it("running");
+        info.network = None;
+        let value = serde_json::to_value(box_info_to_response(&info)).expect("serializable");
+        assert!(value.get("network").is_none());
     }
 
     /// A box `serve` holds no policy for reports no deadline — a clone or an
@@ -2669,23 +2819,27 @@ mod tests {
     }
 
     #[test]
-    fn build_box_options_legacy_network_defaults_inbound_to_enabled() {
-        // Legacy flat `network` never carried an inbound concept — it
-        // predates the outbound/inbound split — so inbound falls back to
-        // its default (Enabled/public) regardless of outbound mode.
-        let req: super::types::CreateBoxRequest = serde_json::from_str(
-            r#"{
-                "image": "alpine:latest",
-                "network": {
-                    "mode": "enabled"
-                }
-            }"#,
-        )
-        .expect("legacy flat body must deserialize");
-        let opts = build_box_options(&req).expect("build");
-        assert!(
-            matches!(opts.inbound_network, NetworkSpec::Enabled { ref allow_net } if allow_net.is_empty())
-        );
+    fn build_box_options_omitted_inbound_defaults_to_disabled() {
+        // A request without inbound has it disabled, whether `network` is absent,
+        // uses the legacy flat shape (which predates the split), or nests
+        // only outbound.
+        for network in [
+            None,
+            Some(r#"{"mode": "enabled"}"#),
+            Some(r#"{"outbound": {"mode": "enabled"}}"#),
+        ] {
+            let body = match network {
+                Some(network) => format!(r#"{{"image": "alpine:latest", "network": {network}}}"#),
+                None => r#"{"image": "alpine:latest"}"#.to_string(),
+            };
+            let req: super::types::CreateBoxRequest =
+                serde_json::from_str(&body).expect("body must deserialize");
+            let opts = build_box_options(&req).expect("build");
+            assert!(
+                matches!(opts.inbound_network, NetworkSpec::Disabled),
+                "network {network:?} must default inbound to disabled"
+            );
+        }
     }
 
     #[test]
@@ -3279,6 +3433,68 @@ mod tests {
             let _ = axum::serve(listener, build_router(state)).await;
         });
         (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    /// `rt.images()` on a REST runtime pointed at `serve` reaches the cache of
+    /// the runtime `serve` runs, each call on its own route.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn images_over_http_reach_the_local_cache() {
+        let home = tempfile::tempdir().expect("runtime home");
+        let local = BoxliteRuntime::new_for_test(boxlite::BoxliteOptions {
+            home_dir: home.path().join("boxlite"),
+            ..Default::default()
+        })
+        .expect("local runtime");
+        let state = Arc::new(AppState {
+            runtime: local.clone(),
+            boxes: RwLock::new(HashMap::new()),
+            executions: RwLock::new(HashMap::new()),
+            api_key: None,
+            lifecycle: RwLock::new(HashMap::new()),
+            last_activity: RwLock::new(HashMap::new()),
+        });
+        let (url, server) = serve_router(state).await;
+        let remote =
+            BoxliteRuntime::rest(boxlite::BoxliteRestOptions::new(url)).expect("rest runtime");
+        let images = remote.images().expect("image handle");
+
+        assert!(images.list().await.expect("list").is_empty());
+
+        // The name crosses as one encoded segment; the cache's refusal names it.
+        let missing = images.get("quay.io/acme/app").await.unwrap_err();
+        assert!(
+            matches!(missing, boxlite::BoxliteError::NotFound(_)),
+            "{missing}"
+        );
+        assert!(
+            missing.to_string().contains("quay.io/acme/app"),
+            "{missing}"
+        );
+        let gone = images.remove("quay.io/acme/app").await.unwrap_err();
+        assert!(matches!(gone, boxlite::BoxliteError::NotFound(_)), "{gone}");
+
+        // Read as an image name, "usage" would be refused as an invalid
+        // argument; on its own route the cache answers that it has no usage.
+        let usage = images.usage().await.unwrap_err();
+        assert!(
+            matches!(usage, boxlite::BoxliteError::Unsupported(_)),
+            "{usage}"
+        );
+
+        // The cache keeps no catalog of aliases, so creation is refused on its route
+        // rather than read as some other request.
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let moved = images
+            .create_alias("quay.io/acme/app", "stable", &digest)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(moved, boxlite::BoxliteError::Unsupported(_)),
+            "{moved}"
+        );
+
+        server.abort();
+        local.shutdown(Some(1)).await.expect("shutdown runtime");
     }
 
     /// Reading a box back over HTTP must report the deadlines `serve` holds.

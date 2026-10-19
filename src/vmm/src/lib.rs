@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Native VMM: guest machine, memory layout, and device model.
-//! The VM lifecycle entry points are still placeholders that panic if called;
-//! the address buses, interrupt routing, and x86_64 legacy devices are
-//! implemented.
+//! `Vm::new` validates the configuration, creates the host VM and registers
+//! guest RAM; the `run` entry points are placeholders that panic if called.
+//! The address buses, interrupt routing, and x86_64 legacy devices are implemented.
 //!
 //! The VMM owns the guest machine and delegates host operations to
 //! `boxlite-hypervisor`. BoxLite runtime integration belongs in its engine adapter.
@@ -15,8 +15,20 @@ mod config;
 pub mod devices;
 pub mod error;
 pub mod irq;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Only the unwired Vm::new uses it.")
+)]
 mod memory;
 #[expect(dead_code, reason = "vCPU workers are not wired yet.")]
 mod vcpu;
 #[expect(dead_code, reason = "The native engine adapter is not wired yet.")]
 mod vm;
+
+/// A recording hypervisor backend shared by the crate's unit tests. Test
+/// files live in `tests/<name>/mod.rs`: a subdirectory keeps Cargo from
+/// compiling them as integration tests, and the `tests` directory keeps them
+/// out of the counted sources and the coverage denominator.
+#[cfg(test)]
+#[path = "../tests/mock_vm/mod.rs"]
+mod mock_vm;

@@ -24,9 +24,10 @@
 
 import {
   CLICKHOUSE_IMAGE,
-  CLICKHOUSE_RETENTION_HOURS,
+  OPENAPI_READER_USERNAME,
   encodeClickHouseUserData,
   renderClickHouseSchema,
+  renderClickHouseLogReaderSql,
 } from '../../clickhouse-host.ts'
 import type { ClickHouse, ClickHouseProvider, ClickHouseRequest } from '../../clickhouse.ts'
 import type { NetworkBinding } from '../../network.ts'
@@ -79,13 +80,19 @@ export const awsClickHouseProvider =
     network,
     region,
     managed,
+    otelOpenapiEnabled = false,
   }: {
     network: Extract<NetworkBinding, { cloud: 'aws' }>
     region: string
     /** The endpoint and its two secrets, for a stage that runs none of its own. */
     managed: { url: string; writerSecretArn: string; readerSecretArn: string } | null
+    otelOpenapiEnabled?: boolean
   }): ClickHouseProvider =>
   (request: ClickHouseRequest): ClickHouse => {
+    if (otelOpenapiEnabled && (request.mode !== 'self-hosted' || request.database !== 'otel' ||
+      [request.writerUsername, request.readerUsername].includes(OPENAPI_READER_USERNAME))) {
+      throw new Error('OTEL_OPENAPI_ENABLED requires self-hosted otel and a separate reader account')
+    }
     if (request.mode === 'disabled') return { active: false, mode: 'disabled' }
 
     if (request.mode === 'managed') {
@@ -110,18 +117,21 @@ export const awsClickHouseProvider =
           passwordRef: $util.output(managed.readerSecretArn),
           credentialVersion: currentVersion('CLICKHOUSE_READER_PASSWORD_SECRET_ARN', managed.readerSecretArn, region),
         },
-        // A managed endpoint admits whoever holds its credential; there is no
-        // group to carry. The empty string is the honest answer, and the API's
-        // provider skips a grant it cannot attach.
-        binding: { cloud: 'aws', clientGrant: $util.output('') },
         id: $util.output(managed.url),
         ready: [],
       }
     }
 
+    // The schema, the readiness environment and its trigger all read the one
+    // resolved value, so the readiness check never compares a schema rendered
+    // at one number against a TTL asserted at another.
+    const { retentionHours } = request
     const admin = clickHouseSecret('ClickHouseAdminSecret', 'clickhouse-admin')
     const writer = clickHouseSecret('ClickHouseWriterSecret', 'clickhouse-writer')
     const reader = clickHouseSecret('ClickHouseReaderSecret', 'clickhouse-reader')
+    const openapiReader = otelOpenapiEnabled
+      ? clickHouseSecret('ClickHouseOpenapiReaderSecret', 'clickhouse-openapi-reader') : null
+    const logReaderSql = openapiReader ? renderClickHouseLogReaderSql() : null
 
     /*
      * An IAM role name, written out rather than taken from `naming`.
@@ -148,7 +158,7 @@ export const awsClickHouseProvider =
     })
     const secretPolicy = new aws.iam.RolePolicy('ClickHouseSecretPolicy', {
       role: role.name,
-      policy: $resolve([admin.resource.arn, writer.resource.arn, reader.resource.arn]).apply(([...arns]) =>
+      policy: $resolve([admin.resource.arn, writer.resource.arn, reader.resource.arn, ...(openapiReader ? [openapiReader.resource.arn] : [])]).apply(([...arns]) =>
         JSON.stringify({
           Version: '2012-10-17',
           Statement: [{ Effect: 'Allow', Action: ['secretsmanager:GetSecretValue'], Resource: arns }],
@@ -239,21 +249,27 @@ export const awsClickHouseProvider =
           CLICKHOUSE_WRITER_SECRET_ARN: writer.resource.arn,
           CLICKHOUSE_READER_SECRET_ARN: reader.resource.arn,
           CLICKHOUSE_EXPECTED_IMAGE: CLICKHOUSE_IMAGE,
-          CLICKHOUSE_SCHEMA_BASE64: Buffer.from(renderClickHouseSchema()).toString('base64'),
-          CLICKHOUSE_RETENTION_HOURS: String(CLICKHOUSE_RETENTION_HOURS),
+          CLICKHOUSE_SCHEMA_BASE64: Buffer.from(renderClickHouseSchema(retentionHours)).toString('base64'),
+          CLICKHOUSE_RETENTION_HOURS: String(retentionHours),
+          ...(openapiReader ? {
+            CLICKHOUSE_OPENAPI_READER_SECRET_ARN: openapiReader.resource.arn,
+            CLICKHOUSE_OPENAPI_READER_SQL_BASE64: Buffer.from(logReaderSql!).toString('base64'),
+          } : {}),
         },
         // Every input that changes the answer. A rotated password re-grants
         // rather than locking the collector out until someone notices.
         triggers: [
+          retentionHours,
           instance.id,
           volume.id,
           userData,
           admin.version.id,
           writer.version.id,
           reader.version.id,
+          ...(openapiReader ? [logReaderSql, openapiReader.version.id] : []),
         ],
       },
-      { dependsOn: [attachment] },
+      { dependsOn: [attachment, ...(openapiReader ? [openapiReader.version] : [])] },
     )
 
     return {
@@ -271,7 +287,6 @@ export const awsClickHouseProvider =
         passwordRef: reader.resource.arn,
         credentialVersion: reader.version.versionId,
       },
-      binding: { cloud: 'aws' as const, clientGrant: securityGroup.id },
       id: instance.id,
       ready: [ready],
     }

@@ -11,7 +11,7 @@ import { BoxMigration } from '../entities/box-migration.entity'
 import { BoxState } from '../enums/box-state.enum'
 import { BoxDesiredState } from '../enums/box-desired-state.enum'
 import { BoxMigrationState } from '../enums/box-migration-state.enum'
-import { Injectable, Logger, NotFoundException } from '@nestjs/common'
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { BoxConflictError } from '../errors/box-conflict.error'
 import { InjectDataSource } from '@nestjs/typeorm'
 import { EventEmitter2 } from '@nestjs/event-emitter'
@@ -19,10 +19,14 @@ import { BaseRepository } from '../../common/repositories/base.repository'
 import { BoxEvents } from '../constants/box-events.constants'
 import { BoxStateUpdatedEvent } from '../events/box-state-updated.event'
 import { BoxDesiredStateUpdatedEvent } from '../events/box-desired-state-updated.event'
-import { BoxPublicStatusUpdatedEvent } from '../events/box-public-status-updated.event'
+import { BoxInboundModeUpdatedEvent } from '../events/box-inbound-mode-updated.event'
 import { BoxOrganizationUpdatedEvent } from '../events/box-organization-updated.event'
 import { BoxLookupCacheInvalidationService } from '../services/box-lookup-cache-invalidation.service'
 import { BoxCreationAdmissionUnavailableError, BoxCreationLimitExceededError } from '../errors/box-creation-limit.error'
+import { RegistryCredential } from '../../registry/entities/registry-credential.entity'
+import { registryProxyHost } from '../../registry/utils/registry-proxy.util'
+import { matchingCredential } from '../../registry/utils/matching-credential'
+import { parseImageRef, upstreamRefOf } from '../../image/utils/image-ref.util'
 
 // SQLSTATE lock_not_available — a statement waited longer than lock_timeout to
 // acquire a lock.
@@ -84,6 +88,7 @@ export class BoxRepository extends BaseRepository<Box> {
     box.enforceInvariants()
 
     await this.withCreationAdmission(box.organizationId, maxCreatedBoxes, async (entityManager) => {
+      await this.lockRegistryCredential(box, entityManager)
       await entityManager.insert(Box, box)
       await this.upsertLastActivity(entityManager, box.id, box.createdAt)
     })
@@ -91,6 +96,33 @@ export class BoxRepository extends BaseRepository<Box> {
     this.invalidateLookupCacheOnInsert(box)
 
     return box
+  }
+
+  private async lockRegistryCredential(box: Box, manager: EntityManager): Promise<void> {
+    const proxy = registryProxyHost()
+    if (!proxy || !box.image?.startsWith(`${proxy}/${box.organizationId}/`)) return
+
+    const { host, repository } = parseImageRef(upstreamRefOf(box.image))
+    try {
+      // Shared until the box commits: deletion cannot pass its dependency
+      // check while this box is still invisible to other transactions.
+      const credentials = await manager
+        .getRepository(RegistryCredential)
+        .createQueryBuilder('credential')
+        .where('credential.organizationId = :organizationId', { organizationId: box.organizationId })
+        .andWhere('credential.registryHost = :host', { host })
+        .setLock('pessimistic_read')
+        .setOnLocked('nowait')
+        .getMany()
+      if (!matchingCredential(credentials, repository)) {
+        throw new ConflictException('Registry credential was removed during box creation; retry the request')
+      }
+    } catch (error) {
+      if ((error as { code?: string }).code === PG_LOCK_TIMEOUT_CODE) {
+        throw new ConflictException('Registry credential is being removed; retry box creation')
+      }
+      throw error
+    }
   }
 
   /**
@@ -518,7 +550,7 @@ export class BoxRepository extends BaseRepository<Box> {
    */
   private emitUpdateEvents(
     updatedBox: Box,
-    previousBox: Pick<Box, 'state' | 'desiredState' | 'public' | 'organizationId'>,
+    previousBox: Pick<Box, 'state' | 'desiredState' | 'inboundEnabled' | 'organizationId'>,
   ): void {
     if (previousBox.state !== updatedBox.state) {
       this.eventEmitter.emit(
@@ -534,10 +566,10 @@ export class BoxRepository extends BaseRepository<Box> {
       )
     }
 
-    if (previousBox.public !== updatedBox.public) {
+    if (previousBox.inboundEnabled !== updatedBox.inboundEnabled) {
       this.eventEmitter.emit(
-        BoxEvents.PUBLIC_STATUS_UPDATED,
-        new BoxPublicStatusUpdatedEvent(updatedBox, previousBox.public, updatedBox.public),
+        BoxEvents.INBOUND_MODE_UPDATED,
+        new BoxInboundModeUpdatedEvent(updatedBox, previousBox.inboundEnabled, updatedBox.inboundEnabled),
       )
     }
 

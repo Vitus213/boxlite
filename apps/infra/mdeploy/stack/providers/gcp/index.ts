@@ -24,13 +24,15 @@ import { gcpImages } from '../../image.ts'
 import { gcpAlarmProvider } from './alarms.ts'
 import { gcpApiProvider } from './api.ts'
 import { gcpCacheProvider } from './cache.ts'
-import { CLICKHOUSE_CALLERS, gcpClickHouseProvider } from './clickhouse.ts'
+import { gcpClickHouseProvider } from './clickhouse.ts'
 import { gcpClusterProvider } from './cluster.ts'
 import { gcpCollectorProvider } from './collector.ts'
 import { gcpDatabaseProvider } from './database.ts'
 import { gcpEdgeProvider } from './edge.ts'
 import { gcpMailProvider } from './mail.ts'
-import { gcpNetworkProvider } from './network.ts'
+import { CLOUDRUN_EGRESS_CIDR, gcpNetworkProvider } from './network.ts'
+import { gcpRegistryCredentialStoreProvider } from './registry-credentials.ts'
+import { gcpRegistryProxyProvider } from './registry-proxy.ts'
 import { gcpRunnerProvider } from './runners.ts'
 import { gcpStorageProvider } from './storage.ts'
 
@@ -78,6 +80,7 @@ export const gcpStackProviders = ({
   artifactsBucket,
   volumePrefix,
   managedClickHouse = null,
+  otelOpenapiEnabled = false,
   clickStackConsumer = null,
   notificationChannels = [],
 }: {
@@ -108,6 +111,7 @@ export const gcpStackProviders = ({
    */
   volumePrefix: string
   managedClickHouse?: { url: string; writerSecretArn: string; readerSecretArn: string } | null
+  otelOpenapiEnabled?: boolean
   /** Who may read the ClickHouse reader password; see `clickstack.ts`. */
   clickStackConsumer?: string | null
   notificationChannels?: string[]
@@ -118,7 +122,8 @@ export const gcpStackProviders = ({
     images: gcpImages({ stage, region, project }),
     network: gcpNetworkProvider({ project, region, appShort }),
     storage: gcpStorageProvider({ project, region, appShort }),
-    // Cloud Run hosts the API and collector; GKE exists only for the proxy.
+    // Cloud Run hosts the API, the collector and the registry proxy; GKE exists
+    // only for the preview proxy.
     cluster: ({ network }) => gcpClusterProvider({ project, region, appShort, network }),
     database: ({ network }) =>
       gcpDatabaseProvider({
@@ -143,11 +148,12 @@ export const gcpStackProviders = ({
         region,
         zone,
         appShort,
-        // The collector writes and the API reads; both carry an account, and
-        // the firewall admits those two and nothing else. The roles come from
-        // the module that owns the rule, so this cannot hand over one identity
-        // while that comment claims two — which is exactly what it used to do.
-        callers: CLICKHOUSE_CALLERS.map((role) => placement(network, role).serviceAccount),
+        // The collector writes and the API reads, and the rule admits those two
+        // and nothing else. By range because both are Cloud Run services, which
+        // arrive with neither an account nor a tag a rule can match; the subnet
+        // holds exactly those two, so one range cannot name half of them the way
+        // a hand-written caller list once did.
+        callerRanges: [CLOUDRUN_EGRESS_CIDR],
         // The one project allowed to connect an endpoint. Today the console is
         // deployed into this same project, so the producer's own id is the
         // accept list; the identity that reads the password is stage
@@ -156,6 +162,7 @@ export const gcpStackProviders = ({
         clickStackConsumerProject: project,
         clickStackConsumerAccount: clickStackConsumer,
         managed: managedClickHouse,
+        otelOpenapiEnabled,
         dependsOn: network.ready,
       }),
     mail: gcpMailProvider({ relayHost }),
@@ -199,6 +206,18 @@ export const gcpStackProviders = ({
         zoneId,
         dependsOn,
       }),
+    registryProxy: ({ network, dependsOn, registryCredentials }) =>
+      gcpRegistryProxyProvider({
+        project,
+        region,
+        registryCredentials,
+        // Its own role, so it runs as its own account: what the proxy is
+        // granted — reading registry credentials among it — is granted to it
+        // alone, not to the control plane beside it.
+        placement: placement(network, 'registry-proxy'),
+        dependsOn,
+      }),
+    registryCredentials: gcpRegistryCredentialStoreProvider({ project, appShort }),
     // 64 alphanumeric characters: the value travels through a systemd
     // EnvironmentFile and a JSON payload, and punctuation would drag quoting
     // rules into both.

@@ -45,6 +45,8 @@ from boxlite import Boxlite, Options, BoxOptions, ImageRegistry
 | `get_info()` | `async (box_id: str) -> Optional[BoxInfo]` | Get current box metadata by ID or name |
 | `list_info()` | `async () -> List[BoxInfo]` | List all boxes |
 | `metrics()` | `async () -> RuntimeMetrics` | Get runtime-wide metrics |
+| `images` | property `-> ImageHandle` | The images this runtime can boot from; see [`boxlite.ImageHandle`](#boxliteimagehandle) |
+| `registries` | property `-> RegistryHandle` | The server's registry logins; raises `UnsupportedError` on a local runtime. See [`boxlite.RegistryHandle`](#boxliteregistryhandle) |
 
 #### Example
 
@@ -72,6 +74,84 @@ box = await runtime.create(BoxOptions(image="alpine:latest"))
 # List all boxes
 for info in await runtime.list_info():
     print(f"{info.id}: {info.state.status}")
+```
+
+### `boxlite.ImageHandle`
+
+The images a runtime can boot from: the local cache on an embedded runtime,
+the server catalog on a REST runtime. Registry credentials are accessed through
+`runtime.images.registries`.
+
+| Operation | Embedded runtime | REST runtime |
+|-----------|------------------|--------------|
+| `pull` | Pulls into the cache | Unsupported; creating a box pulls |
+| `list` | One row per cached reference | Catalog alias and digest references |
+| `get` | Cached versions under the name | Catalog versions, aliases and history |
+| `remove` | Forgets the name; layers stay | Removes the entry; refused while a box can boot from it |
+| `usage` | Unsupported | Image count, allowance and known bytes |
+| `create_alias()` | Unsupported | Creates a new alias for a ready digest; existing names conflict |
+| `delete_alias()` | Unsupported | Removes only the named alias; absent names return NotFound |
+
+`get` and `remove` take an image name, without a tag or digest, such as
+`quay.io/acme/app`. Alias names use OCI tag syntax; creation takes the
+`sha256:` digest of a ready version recorded for that image.
+
+A registry tag belongs to the upstream registry. A BoxLite alias belongs to
+the runtime catalog and selects a recorded digest independently. A successful
+pull seeds an alias from the registry tag; it never overwrites an existing
+binding. Creating an alias never pushes a registry tag or pulls image bytes.
+
+Alias creation refuses every existing name, even for the same digest, with
+`AlreadyExists`. Delete the alias explicitly before creating it again. Deletion
+removes only the binding: versions and existing boxes keep their digests.
+Creation history remains available; deletion is recorded by the server audit log.
+
+Image details and versions expose `aliases`. Their `history` contains
+`ImageAliasEvent` records with `alias`, optional `from_digest`, `to_digest`,
+optional `actor` and `recorded_at`. A local cache mirrors its cached registry
+tags in `aliases`, leaves history empty and refuses alias writes.
+
+```python
+detail = await runtime.images.get("quay.io/acme/app")
+digest = detail.versions[0].digest
+await runtime.images.create_alias(detail.name, "verified", digest)
+await runtime.images.delete_alias(detail.name, "verified")
+logins = await runtime.images.registries.list()
+```
+
+### `boxlite.RegistryHandle`
+
+The logins a REST server presents when it pulls a private image for a box.
+`runtime.images.registries` raises `UnsupportedError` on a local runtime, which pulls
+with the logins in `Options(image_registries=...)` instead.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `list()` | `async () -> List[RegistryCredential]` | Every login the organization holds, oldest first |
+| `create()` | `async (*, registry_host: str, username: str, password: str, repository_prefix: str \| None = None) -> RegistryCredential` | Add a login; `AlreadyExistsError` while one is held for the same registry and prefix |
+| `remove()` | `async (id: str) -> None` | Remove a login; `InvalidStateError`, naming the boxes, while a box still pulls through it; `NotFoundError` for an unknown id |
+
+`create()` takes keyword arguments only. `repository_prefix` is whole path
+segments ending in `/`, such as `"acme/"`; leave it out for the whole
+registry. The password goes up once: `RegistryCredential` has `id`,
+`registry_host`, `repository_prefix`, `username`, `created_by` and
+`created_at`, and no password. `remove()` raises `InvalidArgumentError` for an
+id that is not a UUID, before any request.
+
+```python
+import os
+from boxlite import Boxlite, BoxliteRestOptions, BoxOptions
+
+runtime = Boxlite.rest(BoxliteRestOptions.from_env())
+login = await runtime.images.registries.create(
+    registry_host="ghcr.io",
+    repository_prefix="acme/",
+    username="acme-bot",
+    password=os.environ["GHCR_TOKEN"],
+)
+box = await runtime.create(BoxOptions(image="ghcr.io/acme/private-app:1"))
+for login in await runtime.images.registries.list():
+    print(login.registry_host, login.repository_prefix, login.username)
 ```
 
 ---
@@ -809,6 +889,7 @@ from boxlite import SyncBoxlite, SyncBox, SyncSimpleBox, SyncCodeBox
 | `ExecStderr` | `SyncExecStderr` | Regular iterator |
 | `SimpleBox` | `SyncSimpleBox` | `SimpleBox.info()` is async-only and is not exposed by `SyncSimpleBox` |
 | `CodeBox` | `SyncCodeBox` | Inherits the async-only metadata rule |
+| `RegistryHandle` | `SyncRegistryHandle` | |
 
 ### Classes
 
@@ -823,6 +904,16 @@ with SyncBoxlite.default() as runtime:
     for line in execution.stdout():
         print(line)
     box.stop()
+```
+
+`SyncBoxlite.rest(options)` mirrors `Boxlite.rest(...)`:
+
+```python
+from boxlite import BoxliteRestOptions, SyncBoxlite
+
+with SyncBoxlite.rest(BoxliteRestOptions.from_env()) as runtime:
+    print(runtime.images.usage())
+    print(runtime.images.registries.list())
 ```
 
 #### `SyncSimpleBox`
@@ -868,7 +959,46 @@ from boxlite import BoxliteError, ExecError, TimeoutError, ParseError
 BoxliteError (base)
 ├── ExecError       # Command execution failed
 ├── TimeoutError    # Operation timed out
-└── ParseError      # Output parsing failed
+├── ParseError      # Output parsing failed
+└── NotFoundError, InvalidStateError, …   # Runtime failures, see below
+```
+
+### Runtime failures
+
+A failure the native runtime reports is raised as one class per kind of
+failure, each with a `code`. The names and codes are the ones
+`BoxliteError::http()` gives (`src/shared/src/errors.rs`), so a REST server
+answers the same failure with the same `code`. Every class is also a
+`RuntimeError`, which is what these failures were raised as before.
+
+| Class | `code` | Raised when |
+|-------|--------|-------------|
+| `NotFoundError` | `not_found` | The box, image, volume or snapshot does not exist |
+| `AlreadyExistsError` | `already_exists` | The name is taken |
+| `InvalidStateError` | `invalid_state` | The resource's state does not allow the operation |
+| `InvalidArgumentError` | `invalid_argument` | A value was refused |
+| `UnsupportedError` | `unsupported` | The operation is not available on this runtime |
+| `ResourceExhaustedError` | `resource_exhausted` | A limit was reached |
+| `StoppedError` | `stopped` | The box has stopped |
+| `SessionReapedError` | `session_reaped` | The session was reaped |
+| `ImageError` | `image_pull_failed` | An image could not be pulled or read |
+| `ExecutionError` | `execution_failed` | A process could not be run |
+| `NetworkError` | `network_unavailable` | The network was unavailable |
+| `UpstreamUnavailableError` | `upstream_unavailable` | A component did not answer |
+| `EngineError` | `engine_unavailable` | The virtualization engine failed |
+| `ConfigError` | `config_error` | Configuration is invalid, or authentication failed |
+| `StorageError` | `storage_error` | Storage could not be read or written |
+| `DatabaseError` | `database_error` | The runtime's database failed |
+| `MetadataError` | `metadata_error` | Stored metadata could not be read |
+| `InternalError` | `internal` | An unexpected failure |
+
+```python
+from boxlite import NotFoundError
+
+try:
+    await runtime.remove("no-such-box")
+except NotFoundError as e:
+    print(e.code)  # not_found
 ```
 
 ### `BoxliteError`

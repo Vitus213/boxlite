@@ -211,7 +211,9 @@ impl IoBus {
     /// the 16-bit port space, and a checked add keeps a hostile or
     /// absurdly wide access from wrapping.
     fn window(&self, port: u16, len: u64) -> Result<(u64, &Arc<Mutex<dyn BusDevice + Send>>)> {
-        let end = u64::from(port).checked_add(len).ok_or(Error::IoUnmapped { port })?;
+        let end = u64::from(port)
+            .checked_add(len)
+            .ok_or(Error::IoUnmapped { port })?;
         let (base, (size, device)) = self
             .ranges
             .range(..=port)

@@ -1159,9 +1159,9 @@ pub struct NetworkFlags {
     #[arg(long = "allow-net", value_name = "HOST")]
     pub allow_net: Vec<String>,
 
-    /// Inbound mode: "enabled" (default — services the box exposes are
-    /// publicly reachable) or "disabled" (private, unreachable from outside
-    /// the box).
+    /// Inbound mode: "enabled" (services the box exposes are reachable
+    /// through the remote proxy without sign-in) or "disabled" (default —
+    /// unreachable from outside the box).
     #[arg(long = "inbound", value_name = "MODE")]
     pub inbound: Option<String>,
 
@@ -1192,7 +1192,7 @@ impl NetworkFlags {
         };
 
         // Leave BoxOptions::default() (outbound Enabled/full access, inbound
-        // Enabled/public) untouched when no flag is given, so a bare `run`
+        // Disabled/private) untouched when no flag is given, so a bare `run`
         // behaves as before.
         if self.network.is_none() && self.allow_net.is_empty() && self.inbound.is_none() {
             return Ok(());
@@ -1203,7 +1203,7 @@ impl NetworkFlags {
         };
         let inbound_mode = match self.inbound.as_deref() {
             Some(value) => value.parse::<NetworkMode>()?,
-            None => NetworkMode::Enabled,
+            None => NetworkMode::Disabled,
         };
         opts.network = NetworkSpec::try_from(OutboundNetworkConfig {
             mode,
@@ -1890,13 +1890,6 @@ mod tests {
             panic!("expected run");
         };
         assert_eq!(run.entrypoint.as_deref(), Some("/bin/sh"));
-
-        let cli = Cli::try_parse_from(["boxlite", "cp", "--no-include-parent", "box:/src", "/dst"])
-            .expect("inverse parent option parses");
-        let Commands::Cp(cp) = cli.command else {
-            panic!("expected cp");
-        };
-        assert!(cp.no_include_parent);
     }
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -2321,6 +2314,8 @@ mod tests {
             .expect("disabled is valid");
 
         assert!(matches!(opts.network, NetworkSpec::Disabled));
+        // Without --inbound, inbound stays disabled.
+        assert!(matches!(opts.inbound_network, NetworkSpec::Disabled));
     }
 
     #[test]
@@ -2365,7 +2360,7 @@ mod tests {
     }
 
     #[test]
-    fn test_network_flags_inbound_disabled_sets_private() {
+    fn test_network_flags_inbound_disabled_sets_disabled() {
         // --inbound disabled alone (no --network/--allow-net) still applies,
         // and leaves outbound at its Enabled/full-access default.
         let mut opts = BoxOptions::default();

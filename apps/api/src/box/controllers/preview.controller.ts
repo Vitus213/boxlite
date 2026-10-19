@@ -5,12 +5,45 @@
  */
 
 import Redis from 'ioredis'
-import { Controller, Get, Param, Logger, NotFoundException, UseGuards, Req } from '@nestjs/common'
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Logger,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+  UseGuards,
+  Req,
+  ParseIntPipe,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common'
 import { BoxService } from '../services/box.service'
-import { ApiResponse, ApiOperation, ApiParam, ApiTags, ApiOAuth2, ApiBearerAuth } from '@nestjs/swagger'
+import {
+  ApiResponse,
+  ApiOperation,
+  ApiParam,
+  ApiTags,
+  ApiOAuth2,
+  ApiBearerAuth,
+  ApiExcludeEndpoint,
+} from '@nestjs/swagger'
 import { InjectRedis } from '@nestjs-modules/ioredis'
 import { CombinedAuthGuard } from '../../auth/combined-auth.guard'
 import { OrganizationUserService } from '../../organization/services/organization-user.service'
+import { TunnelService } from '../services/tunnel.service'
+import { ProxyGuard } from '../guards/proxy.guard'
+import { OrganizationService } from '../../organization/services/organization.service'
+import { AUTO_RESUMABLE_STATES, BoxAutoResumeService } from '../services/box-auto-resume.service'
+import { BoxState } from '../enums/box-state.enum'
+import { BoxDesiredState } from '../enums/box-desired-state.enum'
+import { NetworkMode } from '../enums/network-mode.enum'
+
+const INBOUND_CACHE_TTL_SECONDS = 3
+// Sentinel for "no such box", distinct from both modes.
+const INBOUND_CACHE_MISSING = 'missing'
 
 @ApiTags('preview')
 @Controller('preview')
@@ -21,12 +54,62 @@ export class PreviewController {
     @InjectRedis() private readonly redis: Redis,
     private readonly boxService: BoxService,
     private readonly organizationUserService: OrganizationUserService,
+    private readonly tunnelService: TunnelService,
+    private readonly organizationService: OrganizationService,
+    private readonly autoResume: BoxAutoResumeService,
   ) {}
 
-  @Get(':boxId/public')
+  @Get(':boxId/tunnels/:port')
+  @ApiExcludeEndpoint()
+  @UseGuards(CombinedAuthGuard, ProxyGuard)
+  async isPublicTunnelActive(
+    @Param('boxId') boxId: string,
+    @Param('port', ParseIntPipe) port: number,
+  ): Promise<boolean> {
+    if (!(await this.tunnelService.isPublicAccessAllowed(boxId, port))) {
+      throw new NotFoundException('Tunnel not found')
+    }
+    return true
+  }
+
+  // The preview proxy calls this when the runner refuses a guest-port dial
+  // because the box is not running. It takes the same steps as SDK exec's
+  // auto-resume in BoxliteProxyController.proxyToRunner, so preview and SDK
+  // traffic share one policy, one lock and one start. The proxy has no
+  // organization identity, so the organization comes from the box row.
+  @Post(':boxId/ensure-ready')
+  @ApiExcludeEndpoint()
+  @UseGuards(CombinedAuthGuard, ProxyGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async ensureReady(@Param('boxId') boxId: string): Promise<void> {
+    const box = await this.boxService.findOne(boxId)
+    const organization = await this.organizationService.findOne(box.organizationId)
+    if (!organization) {
+      throw new NotFoundException(`Box with ID ${boxId} not found`)
+    }
+
+    if (!box.autoResume) {
+      // A box paused for a snapshot is STARTED and meant to stay so: the proxy
+      // keeps polling until it thaws. Auto-resume boxes go on below.
+      if (box.state === BoxState.STARTED && box.desiredState === BoxDesiredState.STARTED) return
+      throw new ConflictException(`Box ${boxId} has auto-resume disabled`)
+    }
+    // Refuse at once a state (archived, resizing, ...) that never reaches STARTED.
+    if (box.state !== BoxState.STARTED && !AUTO_RESUMABLE_STATES.includes(box.state)) {
+      throw new BadRequestException(`Box ${boxId} cannot be resumed (state: ${box.state})`)
+    }
+
+    // Activity first, so the AutoStop sweeper cannot reap the box being woken.
+    await this.boxService
+      .updateLastActivityAt(box.id, new Date())
+      .catch((err) => this.logger.warn(`updateLastActivityAt failed for ${box.id}: ${err}`))
+    await this.autoResume.ensureReady(box.id, organization)
+  }
+
+  @Get(':boxId/inbound')
   @ApiOperation({
-    summary: 'Check if box is public',
-    operationId: 'isBoxPublic',
+    summary: 'Read the inbound mode of a box',
+    operationId: 'getBoxInboundMode',
   })
   @ApiParam({
     name: 'boxId',
@@ -35,37 +118,33 @@ export class PreviewController {
   })
   @ApiResponse({
     status: 200,
-    description: 'Public status of the box',
-    type: Boolean,
+    description: 'Inbound mode of the box: `enabled` means the proxy may serve its services without sign-in',
+    schema: { type: 'string', enum: Object.values(NetworkMode) },
   })
-  async isBoxPublic(@Param('boxId') boxId: string): Promise<boolean> {
-    const cached = await this.redis.get(`preview:public:${boxId}`)
-    if (cached) {
-      if (cached === '1') {
-        return true
-      }
+  @UseGuards(CombinedAuthGuard, ProxyGuard)
+  async getBoxInboundMode(@Param('boxId') boxId: string): Promise<NetworkMode> {
+    return this.cachedInboundMode(boxId)
+  }
+
+  // 3-second cache: the proxy asks on every preview and tunnel request. A
+  // missing box is cached too, so repeated probes do not reach the database.
+  private async cachedInboundMode(boxId: string): Promise<NetworkMode> {
+    const cacheKey = `preview:inbound:${boxId}`
+    const cached = await this.redis.get(cacheKey)
+    if (cached === INBOUND_CACHE_MISSING) {
       throw new NotFoundException(`Box with ID ${boxId} not found`)
+    }
+    if (cached) {
+      return cached as NetworkMode
     }
 
     try {
-      const isPublic = await this.boxService.isBoxPublic(boxId)
-      //  for private boxes, throw 404 as well
-      //  to prevent using the method to check if a box exists
-      if (!isPublic) {
-        //  cache the result for 3 seconds to avoid unnecessary requests to the database
-        await this.redis.setex(`preview:public:${boxId}`, 3, '0')
-
-        throw new NotFoundException(`Box with ID ${boxId} not found`)
-      }
-      //  cache the result for 3 seconds to avoid unnecessary requests to the database
-      await this.redis.setex(`preview:public:${boxId}`, 3, '1')
-      return true
+      const mode = await this.boxService.getInboundMode(boxId)
+      await this.redis.setex(cacheKey, INBOUND_CACHE_TTL_SECONDS, mode)
+      return mode
     } catch (ex) {
       if (ex instanceof NotFoundException) {
-        //  cache the not found box as well
-        //  as it is the same case as for the private boxes
-        await this.redis.setex(`preview:public:${boxId}`, 3, '0')
-        throw ex
+        await this.redis.setex(cacheKey, INBOUND_CACHE_TTL_SECONDS, INBOUND_CACHE_MISSING)
       }
       throw ex
     }

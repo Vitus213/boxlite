@@ -182,6 +182,26 @@ const bindingsFor = ({
           member: principal,
         }),
       ]
+    case 'write-registry-credentials': {
+      // Both at the project, because the API creates these secrets at run
+      // time and a per-secret binding would need `setIamPolicy`, with which
+      // the API could grant itself the read it is denied. The create stands
+      // unconditioned for the reason `registry-credentials.ts` gives.
+      const { createRole, writeRole, condition } = capability.store.binding
+      return [
+        new gcp.projects.IAMMember(`ApiCapability${index}Create`, {
+          project,
+          role: createRole,
+          member: principal,
+        }),
+        new gcp.projects.IAMMember(`ApiCapability${index}Write`, {
+          project,
+          role: writeRole,
+          member: principal,
+          condition,
+        }),
+      ]
+    }
   }
 }
 
@@ -338,7 +358,17 @@ export const gcpApiProvider =
            * one — and the default is five minutes.
            */
           timeout: '3600s',
-          vpcAccess: { egress: 'PRIVATE_RANGES_ONLY', networkInterfaces: [{ subnetwork: placement.subnetwork }] },
+          /*
+           * The subnet is what gets this service to a runner. Its packets leave
+           * with no service account and no label a rule can match, so the rule
+           * that admits them names the range they come from — see
+           * `CLOUDRUN_EGRESS_CIDR`. Egress anywhere else and every `/v1/boxes/*`
+           * route times out against a healthy host.
+           */
+          vpcAccess: {
+            egress: 'PRIVATE_RANGES_ONLY',
+            networkInterfaces: [{ subnetwork: placement.egressSubnetwork }],
+          },
           containers: [
             {
               image: request.image,
@@ -703,9 +733,12 @@ export const gcpApiProvider =
       ],
     })
     /*
-     * The address, out of the one subnet this network has — which is also where
-     * every client of it sits. Reserved rather than left ephemeral for the same
-     * reason the public one is: it is what a DNS record points at.
+     * The address, out of the subnet this role's own resources sit in — which is
+     * also where every client of it sits, the runners included. Deliberately not
+     * `egressSubnetwork`: that one is the range a firewall rule names as a
+     * source, and an address placed there moves the runners' target and widens
+     * the rule. Reserved rather than left ephemeral for the same reason the
+     * public one is: it is what a DNS record points at.
      */
     const internalAddress = new gcp.compute.Address('ApiInternalAddress', {
       name: instanceFor({ app: $app.name, stage: $app.stage, artifact: 'api-internal' }),

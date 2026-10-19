@@ -31,9 +31,16 @@ import type {
   JsOptions,
 } from "./native-contracts.js";
 export type {
+  ImageDetail,
   ImageHandle,
   ImageInfo,
   ImagePullResult,
+  ImageAliasEvent,
+  ImageUsage,
+  ImageVersion,
+  NewRegistryCredential,
+  RegistryCredential,
+  RegistryHandle,
   VolumeHandle,
   VolumeInfo,
   JsImageRegistry,
@@ -110,7 +117,14 @@ export {
   type Secret,
 } from "./simplebox.js";
 export { type ExecResult } from "./exec.js";
-export { BoxliteError, ExecError, TimeoutError, ParseError } from "./errors.js";
+export {
+  BoxliteError,
+  ExecError,
+  TimeoutError,
+  ParseError,
+  errorCode,
+  type BoxliteErrorCode,
+} from "./errors.js";
 export * from "./constants.js";
 
 // Specialized boxes

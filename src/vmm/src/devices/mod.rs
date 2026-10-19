@@ -70,7 +70,6 @@ mod tests {
         }
     }
 
-
     /// 2026-09-22T12:34:56Z (a Tuesday), the fixed wall clock the probe reads.
     const PROBE_NOW: u64 = 1_790_080_496;
 
@@ -103,14 +102,9 @@ mod tests {
         let kbd = Arc::new(Mutex::new(I8042::new(Arc::clone(&reset))));
 
         let mut bus = IoBus::new();
-        bus.insert(
-            Serial::PORT_BASE,
-            Serial::PORT_WINDOW,
-            serial.clone(),
-        )
-        .unwrap();
-        bus.insert(CmosRtc::PORT_INDEX, 2, rtc)
+        bus.insert(Serial::PORT_BASE, Serial::PORT_WINDOW, serial.clone())
             .unwrap();
+        bus.insert(CmosRtc::PORT_INDEX, 2, rtc).unwrap();
         // One five-port window at 0x60 covers the data port (offset 0) and
         // the command/status port (offset 4), as libkrun registers it.
         bus.insert(I8042::PORT_BASE, I8042::PORT_WINDOW, kbd)

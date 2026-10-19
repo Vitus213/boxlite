@@ -19,6 +19,7 @@ import {
 } from '@nestjs/common'
 import { CombinedAuthGuard } from '../../auth/combined-auth.guard'
 import { BoxService } from '../services/box.service'
+import { networkMode } from '../utils/network-policy.util'
 import {
   ApiOAuth2,
   ApiResponse,
@@ -384,6 +385,12 @@ export class BoxController {
       updateStateDto.state,
       updateStateDto.recoverable,
       updateStateDto.errorReason,
+      // The two travel together; a report carrying a digest without a size is
+      // malformed, and recording 0 for it says the same thing a manifest that
+      // declared no layer sizes says.
+      updateStateDto.imageDigest !== undefined
+        ? { digest: updateStateDto.imageDigest, sizeBytes: updateStateDto.imageSizeBytes ?? 0 }
+        : undefined,
     )
   }
 
@@ -410,13 +417,13 @@ export class BoxController {
   @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.WRITE_BOXES])
   @UseGuards(BoxAccessGuard)
   @Audit({
-    action: AuditAction.UPDATE_PUBLIC_STATUS,
+    action: AuditAction.UPDATE_INBOUND_ACCESS,
     targetType: AuditTarget.BOX,
     targetIdFromRequest: (req) => req.params.boxIdOrName,
     targetIdFromResult: (result: BoxDto) => result?.id,
     requestMetadata: {
       params: (req) => ({
-        isPublic: req.params.isPublic,
+        mode: networkMode(String(req.params.isPublic) === 'true'),
       }),
     },
   })
@@ -425,7 +432,12 @@ export class BoxController {
     @Param('boxIdOrName') boxIdOrName: string,
     @Param('isPublic') isPublic: boolean,
   ): Promise<BoxDto> {
-    const box = await this.boxService.updatePublicStatus(boxIdOrName, isPublic, authContext.organizationId)
+    const box = await this.boxService.updateInboundEnabled(
+      boxIdOrName,
+      // The path segment reaches here as the string 'true' / 'false'.
+      String(isPublic) === 'true',
+      authContext.organizationId,
+    )
     return this.boxService.toBoxDto(box)
   }
 

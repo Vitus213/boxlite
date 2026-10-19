@@ -12,10 +12,16 @@ import { JwtStrategy } from '../auth/jwt.strategy'
 import { OrganizationUserService } from '../organization/services/organization-user.service'
 import { OrganizationService } from '../organization/services/organization.service'
 import { Organization } from '../organization/entities/organization.entity'
+import { UserService } from '../user/user.service'
+import type { User } from '../user/user.entity'
+import { SystemRole } from '../user/enums/system-role.enum'
+import type { ApiKey } from '../api-key/api-key.entity'
 import { BoxService } from '../box/services/box.service'
 import { RunnerService } from '../box/services/runner.service'
 import type { Runner } from '../box/entities/runner.entity'
-import { BoxAutoResumeService } from './box-auto-resume.service'
+import { BoxAutoResumeService } from '../box/services/box-auto-resume.service'
+import { hasOrganizationResourcePermissions } from '../organization/guards/organization-resource-action.guard'
+import { OrganizationResourcePermission } from '../organization/enums/organization-resource-permission.enum'
 
 type RunnerUpgradeRequest = IncomingMessage & {
   __boxliteRunner?: Runner
@@ -26,6 +32,10 @@ type RunnerUpgradeRequest = IncomingMessage & {
 // /api/v1/<tenant>/boxes/<id>/executions/<id>/attach shape with optional query string.
 // Named groups: `tenant` (optional org id / path prefix) and `boxId`.
 const ATTACH_PATH = /^\/api\/v1\/(?:(?<tenant>[^/]+)\/)?boxes\/(?<boxId>[^/]+)\/executions\/[^/]+\/attach(?:\?.*)?$/
+
+// `/attach` streams to an execution's stdin — interactive exec — so a WS upgrade
+// needs the same box-write permission the HTTP exec routes now require.
+const ATTACH_REQUIRED_PERMISSIONS = [OrganizationResourcePermission.WRITE_BOXES]
 
 /**
  * Singleton WebSocket proxy for `/attach` upgrades.
@@ -50,6 +60,7 @@ export class BoxliteWsProxyService {
     private readonly boxService: BoxService,
     private readonly runnerService: RunnerService,
     private readonly autoResume: BoxAutoResumeService,
+    private readonly userService: UserService,
     // Exported by AuthModule (already imported here). Resolves to `undefined`
     // when `skipConnections` is set, so the JWT path guards on it.
     @Inject(JwtStrategy) private readonly jwtStrategy: JwtStrategy | undefined,
@@ -147,24 +158,30 @@ export class BoxliteWsProxyService {
   }
 
   /**
-   * Inline authentication for WS upgrades, mirroring the API-key + JWT halves of
-   * CombinedAuthGuard. Membership-only, like the HTTP exec/attach routes
-   * (`BoxliteProxyController`), which carry no resource-permission decorator.
+   * Inline authentication + authorization for WS upgrades, mirroring the API-key
+   * + JWT halves of CombinedAuthGuard. Beyond org membership it requires the
+   * box-write permission: `/attach` streams to an execution's stdin (interactive
+   * exec), so it is gated like the HTTP exec routes on `BoxliteProxyController`,
+   * which now carry `write:boxes`. It applies the same policy as
+   * OrganizationResourceActionGuard — a system admin and an interactive owner
+   * without an API key are exempt — so the user's system role is resolved here
+   * just as the HTTP strategies resolve it.
    * Never throws — any failure resolves to `null` (a 401), so the fire-and-forget
    * `upgrade` caller can't leak a hung socket.
    *
-   * API key: the bearer must be a non-expired API key whose user is still a
-   * member of the key's organization. The membership check is critical —
+   * API key: the bearer must be a non-expired API key. A non-admin user must
+   * still be a member of the key's organization — this check is critical, since
    * removing a user from an org deletes the OrganizationUser row but does not
    * cascade to ApiKey rows, so without it a removed member's surviving key could
-   * still attach to boxes in that org. The URL tenant is ignored (key is scoped).
+   * still attach — and must carry write:boxes; a system admin is admitted without
+   * either. The URL tenant is ignored (key is scoped).
    *
    * JWT (OIDC): when the bearer is not an API key, verify it via `JwtStrategy`
    * (same JWKS/issuer/audience as the HTTP path). A JWT carries no org, so the
    * organization is taken from the URL `{prefix}` (`urlTenant`); a request with
    * no tenant (or the legacy `default`) is rejected since the org is ambiguous
-   * for a multi-org user. Membership in that org is then required, identically to
-   * the API-key path. `jwtStrategy` is absent when `skipConnections` is set.
+   * for a multi-org user. Authorization then applies identically to the API-key
+   * path. `jwtStrategy` is absent when `skipConnections` is set.
    *
    * Unlike the HTTP path, this does not consult the Redis cache used by
    * ApiKeyStrategy / OrganizationAccessGuard. Upgrade frequency is low; if
@@ -184,13 +201,16 @@ export class BoxliteWsProxyService {
       const apiKey = await this.apiKeyService.getApiKeyByValue(token).catch(() => null)
       if (apiKey) {
         if (apiKey.expiresAt && apiKey.expiresAt < new Date()) return null
-        const membership = await this.organizationUserService.findOne(apiKey.organizationId, apiKey.userId)
-        if (!membership) return null
+        // The system role comes from the key's user, as ApiKeyStrategy resolves it
+        // on the HTTP path.
+        const user = await this.userService.findOne(apiKey.userId)
+        if (!user) return null
+        if (!(await this.authorizeAttach(user, apiKey.organizationId, apiKey))) return null
         const organization = await this.organizationService.findOne(apiKey.organizationId)
         return organization ? { organization } : null
       }
 
-      // 2. JWT (OIDC) — org comes from the URL tenant; membership required.
+      // 2. JWT (OIDC) — org comes from the URL tenant; authorized per authorizeAttach.
       if (!this.jwtStrategy) return null
       if (!urlTenant || urlTenant === 'default') return null
       const payload = await this.jwtStrategy.verifyToken(token)
@@ -200,8 +220,9 @@ export class BoxliteWsProxyService {
       if (claims.cid && claims.uid) userId = claims.uid
       if (!userId) return null
 
-      const membership = await this.organizationUserService.findOne(urlTenant, userId)
-      if (!membership) return null
+      const user = await this.userService.findOne(userId)
+      if (!user) return null
+      if (!(await this.authorizeAttach(user, urlTenant))) return null
       const organization = await this.organizationService.findOne(urlTenant)
       return organization ? { organization } : null
     } catch {
@@ -211,6 +232,25 @@ export class BoxliteWsProxyService {
       // would leak a hung socket.
       return null
     }
+  }
+
+  /**
+   * Authorize an attach upgrade with OrganizationResourceActionGuard's policy,
+   * which the WS upgrade never reaches. A system admin is not organization-scoped
+   * and is admitted without membership, exactly as OrganizationAccessGuard admits
+   * it on the HTTP path. Everyone else must be a current member — removing a user
+   * from an org drops the OrganizationUser row but not their API keys, so the check
+   * is critical — and must carry write:boxes (an org owner without an API key is
+   * exempt). Attach streams to an execution's stdin, i.e. interactive exec.
+   */
+  private async authorizeAttach(user: User, organizationId: string, apiKey?: ApiKey): Promise<boolean> {
+    if (user.role === SystemRole.ADMIN) return true
+    const membership = await this.organizationUserService.findOne(organizationId, user.id)
+    if (!membership) return false
+    return hasOrganizationResourcePermissions(
+      { role: user.role, organizationUser: membership, apiKey },
+      ATTACH_REQUIRED_PERMISSIONS,
+    )
   }
 
   private respondAndClose(socket: Socket, status: number, reason: string): void {

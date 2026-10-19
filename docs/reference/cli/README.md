@@ -301,7 +301,11 @@ Scopes:          box:read, box:write, box:exec
 Create a box from an image (or a prepared rootfs via `--rootfs`) and run a
 command, with docker's semantics: `COMMAND` replaces the image's `CMD`, the
 image's `ENTRYPOINT` is prepended, and the result **is** the container's init
-(PID 1). Omit it and the image's own default runs.
+(PID 1).
+
+`--entrypoint EXEC` replaces the image entrypoint and clears its default
+CMD; only an explicit `COMMAND` is appended. Omit both to run the image's defaults.
+See [startup command overrides](../../concepts/images.md#startup-command-overrides).
 
 The box's lifetime is that command's lifetime. When it exits, the box stops and
 takes the command's exit code; `boxlite ps` shows it stopped and
@@ -373,12 +377,13 @@ boxlite exec -e DEBUG=1 -w /app mybox -- pytest tests/
 Create a box without starting it. Prints the new box's ID to stdout.
 
 `COMMAND` is stored, not run — it becomes the box's main command (the container's
-init) when the box is next started, exactly as it would under `run`. Omit it and
-the image's own default is used.
+init) when the box is next started, exactly as it would under `run`.
+`--entrypoint EXEC` uses the same override rules as [`run`](#boxlite-run), including
+clearing the image CMD. Omit both `COMMAND` and `--entrypoint` to use image defaults.
 
-A box created **with** a command is a job: `exec` and `cp` will not start it
-implicitly, because starting it runs that command. Start it deliberately with
-`boxlite start`. A box created **without** one boots the image's default, and
+A box created **with** `COMMAND` or `--entrypoint` is a job: `exec` and `cp` will not
+start it implicitly, because starting it runs that command. Start it deliberately with
+`boxlite start`. A box created **without** either boots the image's default, and
 `exec` still starts it on demand.
 
 **Options:**
@@ -534,13 +539,16 @@ The Go-template engine exposes a `json` function for serializing nested values.
 format, or `null` if the start time has not been recorded or is unavailable
 over REST. `State.LastActivityAt` is when the box was last active in RFC 3339
 format — the clock AutoStop measures idleness against — or `null` for a local
-box, which records no activity.
+box, which records no activity. `Network.Outbound` and `Network.Inbound` each
+carry `Mode` (`enabled` or `disabled`) and `AllowNet`; `Network` is `null` when
+the runtime does not know the policy, such as a REST server that predates it.
 
 **Examples:**
 
 ```bash
 boxlite inspect mybox
 boxlite inspect --format '{{.State.Status}}' mybox
+boxlite inspect --format '{{.Network.Inbound.Mode}}' mybox
 boxlite inspect --format '{{.State.StartedAt}}' mybox
 boxlite inspect --format '{{.State.LastActivityAt}}' mybox
 boxlite inspect -l --format yaml
@@ -553,6 +561,8 @@ boxlite inspect -l --format yaml
 **Synopsis:** `boxlite cp [OPTIONS] SRC DST`
 
 Copy files/folders between host and box. Exactly one of `SRC` or `DST` must be a `BOX:PATH` reference.
+End a directory `SRC` with `/.` to copy its contents rather than the directory itself, as
+`docker cp` does.
 
 **Options:**
 
@@ -560,7 +570,6 @@ Copy files/folders between host and box. Exactly one of `SRC` or `DST` must be a
 |------|---------|-------------|
 | `--follow-symlinks` | `false` | Resolve symlink targets (embedded local runtime only) |
 | `--no-overwrite` | `false` | Refuse to overwrite destination files (embedded local runtime only) |
-| `--no-include-parent` | `false` | Copy directory contents without their parent (embedded local runtime only) |
 
 If a stopped box is safe to resume, it is started temporarily and restored to
 stopped state after the copy succeeds or fails. A job box whose start would run
@@ -587,6 +596,7 @@ owned by the box's exec user.
 boxlite cp ./script.py mybox:/work/script.py        # host -> box
 boxlite cp mybox:/var/log/app.log ./app.log         # box -> host
 boxlite cp --no-overwrite ./data/ mybox:/data/      # local runtime only
+boxlite cp ./dist/. mybox:/srv/www                  # the contents of ./dist
 ```
 
 ---
@@ -655,9 +665,14 @@ boxlite network tunnel mybox 3000 --listen unix:/tmp/app.sock
 ```
 
 A bare port binds `127.0.0.1`; listener port `0` asks the OS to allocate a
-port. The canonical bound address is printed to stdout before clients are
-accepted. Ctrl-C closes the listener and active connections. TCP hosts must be
-numeric addresses, and Unix socket paths must be absolute.
+port. A client that connects while nothing in the box listens on `GUEST_PORT`
+is disconnected; the listener keeps running. The canonical bound address is
+printed to stdout before clients are accepted.
+Ctrl-C closes the listener and active connections. TCP hosts must be numeric
+addresses, and Unix socket paths must be absolute.
+
+A remote box needs inbound access enabled before it can be tunneled: create it
+with `--inbound enabled`.
 
 ---
 
@@ -674,7 +689,7 @@ Run a long-running REST API server. The server holds a single `BoxliteRuntime` a
 | `--debug` | `false` | Enable debug output |
 | `--port N` | `8100` | TCP port to listen on |
 | `--home PATH` | `~/.boxlite` | Absolute runtime data directory; env `BOXLITE_HOME` |
-| `--host ADDR` | `0.0.0.0` | Bind address |
+| `--host ADDR` | `127.0.0.1` | Bind address. Any non-loopback address (e.g. `0.0.0.0`) requires `--api-key`; `serve` refuses to start otherwise. |
 | `--api-key KEY` | unset | Require this exact `Authorization: Bearer` value (constant-time match) on every route except `GET /v1/config`; env `BOXLITE_SERVE_API_KEY`. Unset is permissive. |
 | `--registry REGISTRY` | none | Image registry; repeatable and prepended to config |
 | `--config PATH` | none | JSON runtime configuration file |
@@ -683,8 +698,8 @@ Run a long-running REST API server. The server holds a single `BoxliteRuntime` a
 
 ```bash
 boxlite serve
-boxlite serve --host 127.0.0.1 --port 9000
-BOXLITE_SERVE_API_KEY="$KEY" boxlite serve --host 127.0.0.1
+boxlite serve --port 9000
+BOXLITE_SERVE_API_KEY="$KEY" boxlite serve --host 0.0.0.0
 ```
 
 ---
@@ -815,7 +830,7 @@ Used by `run` and `create` (defined in `src/cli/src/cli.rs`).
 |------|-------------|
 | `--network <enabled\|disabled>` | Outbound mode; default `enabled`. Disabled mode creates no network interface. |
 | `--allow-net HOST` | Restrict TCP/UDP egress to exact hosts, `*.example.com`, IPs, or CIDRs; repeatable, implies enabled networking, and is incompatible with `--network disabled`. Hostname-only rules deny UDP unless an IP/CIDR is also allowed. |
-| `--inbound <enabled\|disabled>` | Inbound mode; default `enabled` (services exposed by the box are reachable). |
+| `--inbound <enabled\|disabled>` | Inbound mode; default `disabled` (services exposed by the box are unreachable from outside). |
 | `--net-tx-kbps KBPS` | Cap what the box sends (guest to internet), in kilobits/sec. `0` or unset leaves it uncapped. |
 | `--net-rx-kbps KBPS` | Cap what reaches the box (internet to guest), in kilobits/sec. `0` or unset leaves it uncapped. |
 

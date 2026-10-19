@@ -13,8 +13,8 @@ The model is implementation-grounded:
   entity files are the complete list of mapped tables.
 - Column types, constraints, and index definitions come from the migrations in
   [`api/src/migrations`](./api/src/migrations/): the baseline
-  `1741087887225-migration.ts` creates 17 tables, and the
-  [`pre-deploy`](./api/src/migrations/pre-deploy/) set adds 5 more.
+  `1741087887225-migration.ts` and the
+  [`pre-deploy`](./api/src/migrations/pre-deploy/) set create the tables.
 - Satellite stores come from [`dex/config.yaml`](./dex/config.yaml),
   [`otel-collector/config.yaml`](./otel-collector/config.yaml), and the
   ClickHouse queries in
@@ -27,7 +27,7 @@ control plane only through `runner` telemetry columns and `job` results.
 
 ## Overview
 
-The 21 tables sort into three planes. **Tenancy** is who a caller is and what
+The tables sort into three planes. **Tenancy** is who a caller is and what
 they may do; **fleet** is the microVMs and the machines that run them;
 **metering** is what gets billed.
 
@@ -50,11 +50,17 @@ flowchart LR
         t_box["box"]
         t_activity["box_last_activity"]
         t_migration["box_migration"]
+        t_tunnel["tunnel"]
         t_runner["runner"]
         t_region["region"]
         t_volume["volume"]
         t_job["job"]
         t_warm["warm_pool"]
+        t_image["image"]
+        t_imgver["image_version"]
+        t_imgtag["image_tag"]
+        t_imgevent["image_tag_event"]
+        t_regcred["registry_credential"]
     end
 
     subgraph metering["Metering"]
@@ -72,6 +78,12 @@ flowchart LR
     t_assigninv ==>|"roleId"| t_role
     t_activity ==>|"boxId"| t_box
     t_migration ==>|"boxId"| t_box
+    t_tunnel ==>|"box_id"| t_box
+    t_imgver ==>|"imageId"| t_image
+    t_imgtag ==>|"imageId"| t_image
+    t_imgtag ==>|"versionId"| t_imgver
+    t_imgevent ==>|"imageId"| t_image
+    t_imgevent ==>|"fromVersionId, toVersionId"| t_imgver
 
     t_orguser -.->|"userId"| t_user
     t_apikey -.->|"organizationId, userId"| t_org
@@ -82,6 +94,7 @@ flowchart LR
     t_box -.->|"runnerId"| t_runner
     t_box -.->|"volumes[].volumeId"| t_volume
     t_volume -.->|"organizationId"| t_org
+    t_regcred -.->|"organizationId"| t_org
     t_job -.->|"resourceId"| t_box
     t_job -.->|"runnerId"| t_runner
     t_period -.->|"boxId"| t_box
@@ -96,8 +109,9 @@ box request is matched against the pool by shape, not by id.
 
 ## Referential integrity
 
-The schema declares **9 foreign keys across 21 tables**. All of them live
-inside the tenancy cluster or on the two tables owned outright by a box.
+The schema declares foreign keys within the control plane. They live
+inside the tenancy cluster, on tables owned outright by a box, or inside the
+image catalog.
 Every edge that crosses a plane boundary — including `box.organizationId`,
 the most widely joined column in the system — is a bare `uuid` or
 `character varying` column with no constraint behind it.
@@ -118,12 +132,20 @@ that no longer resolves.
 | `organization_role_assignment_invitation`| `roleId`                     | `organization_role.id`         | foreign key | `NO ACTION` |
 | `box_last_activity`                      | `boxId`                      | `box.id`                       | foreign key | `CASCADE` |
 | `box_migration`                          | `boxId`                      | `box.id`                       | foreign key | `CASCADE` |
+| `tunnel`                                 | `box_id`                     | `box.id`                       | foreign key | `CASCADE` |
+| `image_version`                          | `imageId`                    | `image.id`                     | foreign key | `CASCADE` |
+| `image_tag`                              | `imageId`                    | `image.id`                     | foreign key | `CASCADE` |
+| `image_tag`                              | `versionId`                  | `image_version.id`             | foreign key | `RESTRICT` |
+| `image_tag_event`                        | `imageId`                    | `image.id`                     | foreign key | `CASCADE` |
+| `image_tag_event`                        | `fromVersionId`              | `image_version.id`             | foreign key | `RESTRICT` |
+| `image_tag_event`                        | `toVersionId`                | `image_version.id`             | foreign key | `RESTRICT` |
 | `organization_user`                      | `userId`                     | `user.id`                      | application | — |
 | `api_key`                                | `organizationId`, `userId`   | `organization.id`, `user.id`   | application | — |
 | `webhook_initialization`                 | `organizationId`             | `organization.id`              | application | — |
 | `audit_log`                              | `organizationId`             | `organization.id`              | application | — |
 | `audit_log`                              | `targetType`, `targetId`     | any table                      | application | polymorphic, untyped |
 | `region`                                 | `organizationId`             | `organization.id`              | application | null for shared regions |
+| `image`                                  | `organizationId`             | `organization.id`              | application | never null |
 | `organization`                           | `defaultRegionId`            | `region.id`                    | application | — |
 | `volume`                                 | `organizationId`             | `organization.id`              | application | — |
 | `box`                                    | `organizationId`             | `organization.id`              | application | — |
@@ -139,15 +161,16 @@ that no longer resolves.
 
 ### Invariants held by partial unique indexes
 
-Three correctness properties are enforced by the database rather than by
+Four correctness properties are enforced by the database rather than by
 application locking. The per-box Redis locks are advisory and expire, so an
-interleaved pair of handlers could otherwise violate all three.
+interleaved pair of handlers could otherwise violate all four.
 
 | Index                                          | Table               | Definition                                              |
 | ---------------------------------------------- | ------------------- | ------------------------------------------------------- |
 | `box_usage_periods_one_open_period_per_box_idx` | `box_usage_periods` | unique `("boxId")` where `"endAt" IS NULL`              |
 | `IDX_UNIQUE_INCOMPLETE_JOB`                    | `job`               | unique `("resourceType","resourceId","runnerId")` where `"completedAt" IS NULL` |
 | `organization_user_default_user_unique`        | `organization_user` | unique `("userId")` where `"isDefaultForUser" = true`   |
+| `image_org_name_active_unique`                 | `image`             | unique `("organizationId","name")` where `"deletedAt" IS NULL` |
 
 ## Tenancy, access and audit
 
@@ -178,7 +201,7 @@ state inline.
 | `suspendedUntil` | `timestamptz` | nullable |
 | `suspensionReason` | `character varying` | nullable |
 | `suspensionCleanupGracePeriodHours` | `integer` | default `24` |
-| `template_deactivation_timeout_minutes` | `integer` | default `20160` |
+| `image_count_limit` | `integer` | default `20`; catalog entries an organization may keep |
 | `boxLimitedNetworkEgress` | `boolean` | default `false` |
 | `experimentalConfig` | `jsonb` | nullable |
 | `createdAt` / `updatedAt` | `timestamptz` | |
@@ -345,6 +368,7 @@ or `archived`.
 | `name` | `character varying` | unique per organization |
 | `region` | `character varying` | holds `region.id` |
 | `image` | `character varying` | nullable |
+| `imageIsOrgOwned` | `boolean` | nullable; false for the operator's curated set. Null means the row predates the column, and the reader falls back to matching `image` against the curated set as it stands now — which is what every row used to do, and why the column exists |
 | `runnerId` | `uuid` | nullable |
 | `prevRunnerId` | `uuid` | nullable; the runner to revert to if reassignment fails |
 | `class` | `enum` | `small` \| `medium` \| `large`, default `small` |
@@ -364,12 +388,23 @@ or `archived`.
 | `env` | `jsonb` | default `{}` |
 | `labels` | `jsonb` | nullable |
 | `volumes` | `jsonb` | array of `{ volumeId, mountPath }` |
-| `public` | `boolean` | default `false` |
-| `networkBlockAll` | `boolean` | default `false` |
-| `networkAllowList` | `character varying` | nullable |
+| `inboundEnabled` | `boolean` | default `false`; `true` lets the proxy serve exposed services without sign-in |
+| `outboundEnabled` | `boolean` | default `true`; `false` blocks all egress |
+| `outboundAllowNet` | `text[]` | nullable egress allowlist (hosts, wildcards, IPv4, CIDRs); null = full egress |
 | `authToken` | `character varying` | `nanoid(32)`, lowercased |
 | `daemonVersion` | `character varying` | nullable |
 | `createdAt` / `updatedAt` | `timestamptz` | |
+
+The network policy columns store the `/v1` NetworkSpec's `enabled` / `disabled`
+modes as booleans (`true` = `enabled`); the API converts `mode` strings at its
+edges, and its internal create input and the runner create and recover bodies
+carry the same `outboundEnabled` / `outboundAllowNet`. The control-plane `Box`
+DTO reports them as `network.outbound {mode, allow_net}` and
+`network.inbound {mode, allow_net}`, the same `NetworkInfo` schema the `/v1` box
+read returns. It also still serves the deprecated `public`,
+`networkBlockAll` and comma-joined `networkAllowList`
+(`box/utils/network-policy.util.ts`) until the dashboard and Go clients move
+off them (POL-827).
 
 **Unique:** `(organizationId, name)`.
 
@@ -402,16 +437,16 @@ a derived availability score.
 | `class` | `enum` | default `small` |
 | `cpu` | `double precision` | declared capacity |
 | `memoryGiB` | `double precision` | declared capacity |
-| `diskGiB` | `double precision` | declared capacity |
+| `diskGiB` | `double precision` | declared capacity; each heartbeat overwrites it with the size of the filesystem holding the runner's BoxLite home |
 | `gpu` | `integer` | nullable |
 | `gpuType` | `character varying` | nullable |
 | `currentCpuLoadAverage` | `double precision` | |
 | `currentCpuUsagePercentage` | `double precision` | |
 | `currentMemoryUsagePercentage` | `double precision` | |
-| `currentDiskUsagePercentage` | `double precision` | |
+| `currentDiskUsagePercentage` | `double precision` | use of that filesystem (`df` Use%) |
 | `currentAllocatedCpu` | `double precision` | |
 | `currentAllocatedMemoryGiB` | `double precision` | |
-| `currentAllocatedDiskGiB` | `double precision` | |
+| `currentAllocatedDiskGiB` | `double precision` | used GiB on that filesystem (`df` Used), not a sum of box sizes |
 | `currentStartedBoxes` | `integer` | |
 | `availabilityScore` | `integer` | |
 | `unschedulable` | `boolean` | default `false` |
@@ -466,6 +501,127 @@ derived from the row id (`boxlite-volume-<id>`).
 
 Attachment lives in `box.volumes`, so attaching or detaching a volume never
 writes to this table.
+
+### `image`
+
+One row per upstream repository an organization has pulled, written after a box
+built from it reaches STARTED. Curated images are never rows here: they stay
+env-driven, and the catalog endpoints union them in at read time. `GET /images`,
+`GET /images/usage`, `GET /images/:idOrRef` and `DELETE /images/:idOrRef` read
+these tables; nothing but a box reaching STARTED writes them.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `uuid` | primary key |
+| `organizationId` | `uuid` | not null — there is no shared row |
+| `name` | `character varying(255)` | upstream repository path, e.g. `docker.io/library/python` |
+| `lastUsedAt` | `timestamptz` | nullable |
+| `deletedAt` | `timestamptz` | nullable — soft delete |
+| `createdAt` / `updatedAt` | `timestamptz` | |
+
+Uniqueness is a partial index rather than a table constraint, so a soft-deleted
+name can be used again; `image_org_lastused_index` serves the count the
+admission gate takes when a create names an image the organization does not
+hold yet, and the per-org listing the catalog API serves. A soft delete leaves
+the versions and aliases behind — the cascade only fires on a real delete — so
+every catalog read joins back to `image` and filters `deletedAt IS NULL`.
+
+### `image_version`
+
+One row per distinct manifest digest of an image. Rows appear only after a pull
+succeeds, so there is no pending state to go stale — a failed pull is recorded
+on the box that attempted it. The one thing a failed pull writes here is
+`upstreamMissingAt`, on a build the registry no longer has.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `uuid` | primary key |
+| `imageId` | `uuid` | → `image.id`, cascade delete |
+| `digest` | `character varying(71)` | OCI manifest digest, unique per image |
+| `sizeBytes` | `bigint` | sum of the declared layer sizes |
+| `state` | `enum` | `ready` \| `deleted`, default `ready` |
+| `sourceKind` | `enum` | `pull` |
+| `sourceSpec` | `jsonb` | `{ sourceRef }` — what the user typed |
+| `storageRef` | `text` | where to fetch the bytes from |
+| `lastUsedAt` | `timestamptz` | nullable; when a box last started from this build |
+| `upstreamMissingAt` | `timestamptz` | nullable; when a pull first failed with the registry's `MANIFEST_UNKNOWN` or `NAME_UNKNOWN`. A mark, not a state: never cleared, and the version stays usable on runners that cached it |
+| `createdAt` | `timestamptz` | |
+
+The digest is unique per image, not per organization: the same public image
+reached through two upstream paths is normal usage.
+
+Catalog bindings are called **aliases** in the API, SDKs and entity classes.
+`ImageAlias` and `ImageAliasEvent` map to the existing `image_tag` and
+`image_tag_event` storage names; `aliasName` maps to column `tagName`.
+These explicit mappings preserve existing data and rolling-deployment compatibility.
+Alias creation uses the unique image/name constraint and refuses conflicts;
+deletion removes only the binding. Registry tags remain upstream reference metadata.
+
+### `image_tag`
+
+The version a catalog alias selects. Pulls seed aliases from registry tags.
+Explicit creation refuses every existing name; replacing a binding requires
+deleting the alias and creating it again. Picking up where a tag points upstream
+is `DELETE /images/:idOrRef` followed by using the reference again, which brings
+the name back as a fresh entry.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `uuid` | primary key |
+| `imageId` | `uuid` | → `image.id`, cascade delete |
+| `name` | `character varying(128)` | unique per image |
+| `versionId` | `uuid` | → `image_version.id`, **restrict** delete |
+| `updatedAt` | `timestamptz` | |
+
+`versionId` restricts rather than cascades: a version an alias still names must not
+disappear underneath it. Postgres does not index a foreign key on its own, and
+this one is walked whenever a version is deleted, so `image_tag_version_index`
+covers it.
+
+### `image_tag_event`
+
+Alias registration history. A row is written when a pull seeds an alias or
+an explicit creation succeeds, and is never updated. The history of an image is
+this table read newest first.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `uuid` | primary key |
+| `imageId` | `uuid` | → `image.id`, cascade delete |
+| `tagName` | `character varying(128)` | |
+| `fromVersionId` | `uuid` | nullable; → `image_version.id`, **restrict** delete. Null for alias creation |
+| `toVersionId` | `uuid` | → `image_version.id`, **restrict** delete |
+| `actorId` | `character varying` | nullable; the identity provider subject of whoever created it. Null when a pull seeded the alias |
+| `createdAt` | `timestamptz` | default `clock_timestamp()` |
+
+`createdAt` is the moment the row is written, not the start of its transaction:
+registration writes use the time the row is inserted, so concurrent creations
+sort by their observed write time. `image_tag_event_image_created_index` on
+`("imageId","createdAt")` serves the newest-first read backwards.
+
+### `registry_credential`
+
+A login an organization registered for a private registry. The password is in
+no column: it is written to Secret Manager, which the API can write but not
+read, and the row keeps only the name of the version that holds it.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `uuid` | primary key |
+| `organizationId` | `uuid` | not null |
+| `kind` | `enum` | `basic` |
+| `registryHost` | `character varying(255)` | e.g. `ghcr.io` |
+| `repositoryPrefix` | `character varying(255)` | default `''`, the whole host |
+| `username` | `character varying(255)` | |
+| `secretVersion` | `text` | the Secret Manager version holding the password |
+| `createdBy` | `character varying` | nullable — the identity provider's subject, not a uuid |
+| `createdAt` / `updatedAt` | `timestamptz` | |
+
+`registry_credential_org_host_prefix_unique` allows one credential per host and
+prefix in an organization; its leading columns also serve the lookup by
+organization and host. `registry_credential_prefix_shape` holds a prefix to
+whole path segments, `''` or ending in `/`, so `acme/` cannot match
+`acme-other/app`.
 
 ### `job`
 
@@ -524,6 +680,29 @@ type deliberately matches `box.updatedAt`: narrower precision would round the
 copy and fail the comparison it exists for.
 
 **Index:** `(state)`.
+
+### `tunnel`
+
+One access declaration per box port. Only public access is enabled; private
+mode and `token_hash` are reserved for later.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `uuid` | primary key |
+| `box_id` | `character varying(12)` | FK → `box.id`, cascades on hard deletion |
+| `port` | `integer` | 1–65535 |
+| `access_mode` | `character varying` | `public` or reserved `private` |
+| `token_hash` | `character varying` | null for public; non-null for private |
+| `created_at` | `timestamptz` | creation time |
+| `revoked_at` | `timestamptz` | null while active |
+
+**Unique:** `(box_id, port)`. Repeating an authorized tunnel request keeps the
+declaration active.
+
+The migration creates no declarations for existing boxes. Existing preview and
+tunnel hostnames become reachable only after the owner prepares that port with
+`POST /api/v1/boxes/{boxId}/network/tunnel?port={port}`. Rows survive box
+stop/start and proxy restart; hard deletion of a box removes its rows.
 
 ### `box_last_activity`
 
@@ -633,7 +812,7 @@ boundary.
 
 | Store | Owner | Contents |
 | ----- | ----- | -------- |
-| ClickHouse database `otel` | written by [`otel-collector`](./otel-collector/config.yaml), read by `apps/api` | `otel_logs`, `otel_traces`, `otel_metrics_gauge` — the upstream ClickHouse exporter's own schema, queried by [`box-telemetry`](./api/src/box-telemetry/services/box-telemetry.service.ts) to serve per-box logs, traces, and metrics. The collector runs with `create_schema: false` and a 72-hour TTL, so it writes the tables but does not own them. |
+| ClickHouse database `otel` | written by [`otel-collector`](./otel-collector/config.yaml), read by `apps/api` | `otel_logs`, `otel_traces`, `otel_metrics_gauge` — the upstream ClickHouse exporter's own schema, queried by [`box-telemetry`](./api/src/box-telemetry/services/box-telemetry.service.ts) to serve per-box logs, traces, and metrics. The collector uses `create_schema: false`; self-hosted infrastructure owns table TTLs through `CLICKHOUSE_RETENTION_HOURS`, defaulting to 720 hours (30 days). |
 | SQLite `/var/dex/dex.db` | [`dex`](./dex/config.yaml) | Dex's own OIDC state — clients, auth codes, refresh tokens, signing keys. The control plane knows a person only by the subject dex issues, stored as `user.id`. |
 | Redis | `apps/api` | Advisory locks, rate-limit counters, and caches. Not a table store, and not a source of truth: because the locks expire, the invariants that matter live in the partial unique indexes listed above. |
 

@@ -274,10 +274,11 @@ impl From<&crate::runtime::options::VolumeSpec> for CreateBoxVolumeSpec {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum CreateBoxNetworkSpec {
-    /// Pre-split shape — sent when inbound is at its default so servers that
-    /// predate the inbound/outbound split (#1199) keep working.
+    /// Pre-split shape — sent when inbound is disabled (the default) so
+    /// servers that predate the inbound/outbound split (#1199) keep working.
+    /// Servers read the missing inbound as disabled.
     Legacy(CreateBoxLegacyNetworkSpec),
-    /// Inbound/outbound shape — sent when inbound is explicitly configured.
+    /// Inbound/outbound shape — sent when inbound is enabled.
     Nested(CreateBoxNestedNetworkSpec),
 }
 
@@ -321,26 +322,28 @@ impl CreateBoxNetworkSpec {
         inbound: &crate::runtime::options::NetworkSpec,
     ) -> Self {
         let config = crate::runtime::options::NetworkConfig::from_specs(outbound, inbound);
-        // Use the legacy flat shape when inbound is at its default (Enabled,
-        // empty allowlist). Any explicit inbound configuration requires the
-        // nested shape and a server that understands it (#1199+).
+        // Servers read an omitted inbound as disabled, so the flat shape
+        // carries a disabled inbound; enabling it requires the nested shape
+        // and a server that understands it (#1199+).
         match inbound {
-            crate::runtime::options::NetworkSpec::Enabled { allow_net } if allow_net.is_empty() => {
+            crate::runtime::options::NetworkSpec::Disabled => {
                 Self::Legacy(CreateBoxLegacyNetworkSpec {
                     mode: mode_str(config.outbound.mode),
                     allow_net: config.outbound.allow_net,
                 })
             }
-            _ => Self::Nested(CreateBoxNestedNetworkSpec {
-                outbound: CreateBoxOutboundNetworkSpec {
-                    mode: mode_str(config.outbound.mode),
-                    allow_net: config.outbound.allow_net,
-                },
-                inbound: CreateBoxInboundNetworkSpec {
-                    mode: mode_str(config.inbound.mode),
-                    allow_net: config.inbound.allow_net,
-                },
-            }),
+            crate::runtime::options::NetworkSpec::Enabled { .. } => {
+                Self::Nested(CreateBoxNestedNetworkSpec {
+                    outbound: CreateBoxOutboundNetworkSpec {
+                        mode: mode_str(config.outbound.mode),
+                        allow_net: config.outbound.allow_net,
+                    },
+                    inbound: CreateBoxInboundNetworkSpec {
+                        mode: mode_str(config.inbound.mode),
+                        allow_net: config.inbound.allow_net,
+                    },
+                })
+            }
         }
     }
 }
@@ -393,6 +396,10 @@ pub(crate) struct BoxResponse {
     pub auto_delete: u32,
     #[serde(default = "default_auto_resume")]
     pub auto_resume: bool,
+    /// The policy in both directions. A server that predates the field
+    /// omits it, which reads as "unknown", not as any particular policy.
+    #[serde(default)]
+    pub network: Option<crate::NetworkInfo>,
 }
 
 impl BoxResponse {
@@ -437,10 +444,10 @@ impl BoxResponse {
             image: self.image.clone(),
             cpus: self.cpus,
             memory_mib: self.memory_mib,
-            // The remote REST surface intentionally does not publish local
-            // host bindings. Missing network metadata is therefore distinct
-            // from a locally verified, resolved-empty publication list.
-            network: None,
+            // Local host bindings never travel over REST, so a published
+            // policy arrives with `published_ports: None`; a server that
+            // predates the field leaves the whole thing unknown.
+            network: self.network.clone(),
             labels: self.labels.clone(),
             auto_stop: self.auto_stop,
             auto_delete: self.auto_delete,
@@ -452,6 +459,9 @@ impl BoxResponse {
             // "the box never entered Running".
             started_at: None,
             last_activity_at,
+            // Not published by the REST surface either: the control plane keeps
+            // the digest in its image catalog, not on the box it returns.
+            resolved_image: None,
         })
     }
 }
@@ -526,6 +536,209 @@ impl VolumeResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ListVolumesResponse {
     pub volumes: Vec<VolumeResponse>,
+}
+
+// ============================================================================
+// Images
+// ============================================================================
+
+/// When the server recorded something; epoch when the time does not parse,
+/// matching the local image cache's deterministic fallback.
+fn recorded_time(raw: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|time| time.with_timezone(&chrono::Utc))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
+}
+
+/// One reference, as `GET /v1/{prefix}/images` lists it.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageInfoResponse {
+    pub reference: String,
+    pub repository: String,
+    pub tag: String,
+    pub id: String,
+    pub cached_at: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+impl ImageInfoResponse {
+    pub fn into_image_info(self) -> crate::runtime::types::ImageInfo {
+        crate::runtime::types::ImageInfo {
+            cached_at: recorded_time(&self.cached_at),
+            reference: self.reference,
+            repository: self.repository,
+            tag: self.tag,
+            id: self.id,
+            size: self
+                .size_bytes
+                .map(crate::runtime::types::Bytes::from_bytes),
+        }
+    }
+}
+
+/// Response for `GET /v1/{prefix}/images`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListImagesResponse {
+    pub images: Vec<ImageInfoResponse>,
+}
+
+/// A time the server may leave out; `None` when it does, or when it does not
+/// parse, rather than a time nobody observed.
+fn optional_time(raw: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw?)
+        .ok()
+        .map(|time| time.with_timezone(&chrono::Utc))
+}
+
+/// One build, as `GET /v1/{prefix}/images/{name}` lists it. The fields after
+/// `recorded_at` default, so a server that predates them still reads.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageVersionResponse {
+    pub digest: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    pub source_ref: String,
+    pub recorded_at: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub upstream_missing_at: Option<String>,
+}
+
+/// One alias history entry, including bindings recorded by pulls.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageAliasEventResponse {
+    pub alias: String,
+    #[serde(default)]
+    pub from_digest: Option<String>,
+    pub to_digest: String,
+    #[serde(default)]
+    pub actor: Option<String>,
+    pub recorded_at: String,
+}
+
+/// Response for `GET /v1/{prefix}/images/{name}` and for alias creation.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageDetailResponse {
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub curated: bool,
+    #[serde(default)]
+    pub versions: Vec<ImageVersionResponse>,
+    #[serde(default)]
+    pub history: Vec<ImageAliasEventResponse>,
+}
+
+/// Body for `POST /v1/{prefix}/images/{name}/aliases`.
+#[derive(Debug, Serialize)]
+pub(crate) struct CreateAliasRequest<'a> {
+    pub alias: &'a str,
+    pub digest: &'a str,
+}
+
+impl ImageDetailResponse {
+    pub fn into_image_detail(self) -> crate::runtime::types::ImageDetail {
+        crate::runtime::types::ImageDetail {
+            name: self.name,
+            aliases: self.aliases,
+            curated: self.curated,
+            versions: self
+                .versions
+                .into_iter()
+                .map(|version| crate::runtime::types::ImageVersion {
+                    recorded_at: recorded_time(&version.recorded_at),
+                    last_used_at: optional_time(version.last_used_at.as_deref()),
+                    upstream_missing_at: optional_time(version.upstream_missing_at.as_deref()),
+                    digest: version.digest,
+                    size_bytes: version.size_bytes,
+                    source_ref: version.source_ref,
+                    aliases: version.aliases,
+                })
+                .collect(),
+            history: self
+                .history
+                .into_iter()
+                .map(|event| crate::runtime::types::ImageAliasEvent {
+                    recorded_at: recorded_time(&event.recorded_at),
+                    alias: event.alias,
+                    from_digest: event.from_digest,
+                    to_digest: event.to_digest,
+                    actor: event.actor,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Response for `GET /v1/{prefix}/images/usage`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageUsageResponse {
+    pub count: u64,
+    pub limit: u64,
+    pub known_bytes: u64,
+}
+
+// ============================================================================
+// Registries
+// ============================================================================
+
+/// Body for `POST /v1/{prefix}/images/registries`. No `Debug`: it holds the password.
+#[derive(Serialize)]
+pub(crate) struct CreateRegistryRequest<'a> {
+    pub registry_host: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_prefix: Option<&'a str>,
+    pub username: &'a str,
+    pub password: &'a str,
+}
+
+impl<'a> CreateRegistryRequest<'a> {
+    pub fn from_credential(credential: &'a crate::runtime::NewRegistryCredential) -> Self {
+        Self {
+            registry_host: &credential.registry_host,
+            repository_prefix: credential.repository_prefix.as_deref(),
+            username: &credential.username,
+            password: &credential.password,
+        }
+    }
+}
+
+/// One login, as `/v1/{prefix}/images/registries` answers it. There is no password
+/// field, so one a server sent back is dropped here.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RegistryCredentialResponse {
+    pub id: String,
+    pub registry_host: String,
+    #[serde(default)]
+    pub repository_prefix: String,
+    pub username: String,
+    #[serde(default)]
+    pub created_by: Option<String>,
+    pub created_at: String,
+}
+
+impl RegistryCredentialResponse {
+    pub fn into_registry_credential(self) -> crate::runtime::RegistryCredential {
+        crate::runtime::RegistryCredential {
+            created_at: recorded_time(&self.created_at),
+            id: self.id,
+            registry_host: self.registry_host,
+            repository_prefix: self.repository_prefix,
+            username: self.username,
+            created_by: self.created_by,
+        }
+    }
+}
+
+/// Response for `GET /v1/{prefix}/images/registries`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListRegistriesResponse {
+    pub registries: Vec<RegistryCredentialResponse>,
 }
 
 // ============================================================================
@@ -734,10 +947,53 @@ mod tests {
     use crate::runtime::options::BoxOptions;
 
     #[test]
+    fn rest_recorded_timestamps_are_stable_across_conversions() {
+        for (raw, seconds) in [
+            ("invalid", 0),
+            ("", 0),
+            ("1970-01-02T02:00:00+02:00", 86_400),
+        ] {
+            let info: ImageInfoResponse = serde_json::from_value(serde_json::json!({
+                "reference": "quay.io/acme/app:latest",
+                "repository": "quay.io/acme/app", "tag": "latest",
+                "id": "sha256:abc", "cached_at": raw
+            }))
+            .unwrap();
+            let detail: ImageDetailResponse = serde_json::from_value(serde_json::json!({
+                "name": "quay.io/acme/app",
+                "versions": [{
+                    "digest": "sha256:abc", "source_ref": "quay.io/acme/app:latest",
+                    "recorded_at": raw
+                }],
+                "history": [{"alias": "latest", "to_digest": "sha256:abc", "recorded_at": raw}]
+            }))
+            .unwrap();
+            let registry: RegistryCredentialResponse = serde_json::from_value(serde_json::json!({
+                "id": "registry-1", "registry_host": "quay.io",
+                "username": "reader", "created_at": raw
+            }))
+            .unwrap();
+            let detail = detail.into_image_detail();
+            let expected = chrono::DateTime::from_timestamp(seconds, 0).unwrap();
+            assert_eq!(
+                [
+                    info.into_image_info().cached_at,
+                    detail.versions[0].recorded_at,
+                    detail.history[0].recorded_at,
+                    registry.into_registry_credential().created_at,
+                ],
+                [expected; 4],
+                "wire timestamp: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_create_box_request_serialization() {
         use crate::runtime::options::{BoxOptions, NetworkSpec, RootfsSpec};
 
-        // inbound at default → legacy flat shape, accepted by all server versions.
+        // inbound at default (Disabled) → legacy flat shape, accepted by all
+        // server versions.
         let opts = BoxOptions {
             rootfs: RootfsSpec::Image("python:3.11".into()),
             cpus: Some(2),
@@ -745,7 +1001,6 @@ mod tests {
             network: NetworkSpec::Enabled {
                 allow_net: vec!["api.openai.com".into()],
             },
-            // inbound_network left at default: Enabled { allow_net: [] }
             ..Default::default()
         };
         let mut req = CreateBoxRequest::from_options(&opts, Some("mybox".into()));
@@ -784,7 +1039,9 @@ mod tests {
             network: NetworkSpec::Enabled {
                 allow_net: vec!["api.openai.com".into()],
             },
-            inbound_network: NetworkSpec::Disabled,
+            inbound_network: NetworkSpec::Enabled {
+                allow_net: Vec::new(),
+            },
             secrets: vec![Secret {
                 name: "openai".into(),
                 value: "sk-test".into(),
@@ -802,14 +1059,14 @@ mod tests {
         assert!(req.rootfs_path.is_none());
         assert_eq!(req.cpus, Some(4));
         assert_eq!(req.memory_mib, Some(1024));
-        // inbound is Disabled (non-default) → nested shape required.
+        // inbound is Enabled (non-default) → nested shape required.
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["network"]["outbound"]["mode"], "enabled");
         assert_eq!(
             json["network"]["outbound"]["allow_net"][0],
             "api.openai.com"
         );
-        assert_eq!(json["network"]["inbound"]["mode"], "disabled");
+        assert_eq!(json["network"]["inbound"]["mode"], "enabled");
         assert!(json["network"]["mode"].is_null());
         assert_eq!(req.secrets.as_ref().map(Vec::len), Some(1));
         let volume = &req.volumes.as_ref().unwrap()[0];
@@ -987,8 +1244,37 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["network"]["mode"], "disabled");
         // NetworkSpec::Disabled only overrides outbound; inbound keeps its
-        // default (Enabled/public) — not present in the legacy flat shape.
+        // default (Disabled/private) — not present in the legacy flat shape.
         assert!(json["network"]["outbound"].is_null());
+    }
+
+    /// Servers read an omitted inbound as disabled, so the flat shape is only
+    /// safe to send with inbound disabled; an enabled inbound must travel nested.
+    #[test]
+    fn test_create_box_request_network_shape_follows_inbound_mode() {
+        use crate::runtime::options::{BoxOptions, NetworkSpec, RootfsSpec};
+
+        let with_inbound = |inbound_network: NetworkSpec| BoxOptions {
+            rootfs: RootfsSpec::Image("alpine:latest".into()),
+            inbound_network,
+            ..Default::default()
+        };
+
+        let disabled = CreateBoxRequest::from_options(&with_inbound(NetworkSpec::Disabled), None);
+        let json = serde_json::to_value(&disabled).unwrap();
+        assert_eq!(json["network"]["mode"], "enabled");
+        assert!(json["network"]["inbound"].is_null());
+
+        let enabled = CreateBoxRequest::from_options(
+            &with_inbound(NetworkSpec::Enabled {
+                allow_net: Vec::new(),
+            }),
+            None,
+        );
+        let json = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(json["network"]["outbound"]["mode"], "enabled");
+        assert_eq!(json["network"]["inbound"]["mode"], "enabled");
+        assert!(json["network"]["mode"].is_null());
     }
 
     /// REST is intentionally a "the server picks the security policy"
@@ -1068,6 +1354,42 @@ mod tests {
         assert_eq!(resp.cpus, 2);
         assert_eq!(resp.auto_stop, 900);
         assert_eq!(resp.auto_delete, 0);
+        assert!(
+            resp.network.is_none(),
+            "a server that predates the field leaves the policy unknown"
+        );
+    }
+
+    #[test]
+    fn test_box_response_network_maps_to_network_info() {
+        use crate::runtime::options::NetworkMode;
+
+        let json = r#"{
+            "box_id": "01J0000000000000000000000A",
+            "status": "running",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:01:00Z",
+            "pid": null,
+            "image": "python:3.11",
+            "cpus": 2,
+            "memory_mib": 512,
+            "network": {
+                "outbound": { "mode": "enabled", "allow_net": ["api.openai.com"] },
+                "inbound": { "mode": "enabled" }
+            }
+        }"#;
+        let resp: BoxResponse = serde_json::from_str(json).unwrap();
+        let info = resp.to_box_info().expect("valid box_id should parse");
+
+        let network = info.network.expect("the server published the policy");
+        assert_eq!(network.outbound.mode, NetworkMode::Enabled);
+        assert_eq!(network.outbound.allow_net, vec!["api.openai.com"]);
+        assert_eq!(network.inbound.mode, NetworkMode::Enabled);
+        assert!(network.inbound.allow_net.is_empty());
+        assert!(
+            network.published_ports.is_none(),
+            "host bindings never travel over REST"
+        );
     }
 
     #[test]
@@ -1088,6 +1410,7 @@ mod tests {
             auto_stop: 1800,
             auto_delete: 604800,
             auto_resume: true,
+            network: None,
         };
         let info = resp.to_box_info().expect("valid ULID box_id should parse");
         assert_eq!(info.name.as_deref(), Some("mybox"));
@@ -1117,6 +1440,7 @@ mod tests {
             auto_stop: 1800,
             auto_delete: 0,
             auto_resume: true,
+            network: None,
         };
 
         let info = resp.to_box_info().expect("valid box_id should parse");
@@ -1153,6 +1477,7 @@ mod tests {
             auto_stop: 900,
             auto_delete: 0,
             auto_resume: true,
+            network: None,
         };
         let info = resp.to_box_info().expect("UUID box_id should parse");
         assert_eq!(info.id.as_str(), "d406c59d-eb09-4bc3-9b3a-62455c7e8f32");
@@ -1182,6 +1507,7 @@ mod tests {
             auto_stop: 900,
             auto_delete: 0,
             auto_resume: true,
+            network: None,
         };
         assert!(mk("").to_box_info().is_err(), "empty");
         assert!(mk("a/b").to_box_info().is_err(), "slash");
@@ -1255,6 +1581,7 @@ mod tests {
             auto_stop: 900,
             auto_delete: 0,
             auto_resume: true,
+            network: None,
         };
 
         // Legacy transient statuses map to Unknown (no longer valid)

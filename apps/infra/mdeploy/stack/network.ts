@@ -23,13 +23,19 @@
  * oversight, so the contract names it — a provider that quietly gave the runner
  * the services' private placement would work until the first image pull.
  *
- * Roles are a closed set rather than free-form strings. There are four of them
- * and a graph engine to express four edges would be more machinery than the
- * edges. A fifth role is a deliberate edit here, which is the right cost.
+ * Roles are a closed set rather than free-form strings. There are five of them
+ * and a graph engine to express their edges would be more machinery than the
+ * edges. Another role is a deliberate edit here, which is the right cost.
+ *
+ * The fifth, `registry-proxy`, is a role rather than a second hat on the API
+ * because what it holds differs. It terminates a runner's credential and, once
+ * registry credentials exist, is the one process that reads them — so it gets
+ * an identity of its own, and whatever that identity is granted is granted to
+ * it alone rather than to the control plane beside it.
  */
 
-/** The four kinds of workload BoxLite runs. */
-export type WorkloadRole = 'api' | 'proxy' | 'otel-collector' | 'runner'
+/** The five kinds of workload BoxLite runs. */
+export type WorkloadRole = 'api' | 'proxy' | 'otel-collector' | 'runner' | 'registry-proxy'
 
 /**
  * Where in the network a role sits.
@@ -62,9 +68,24 @@ export type Placement =
   | {
       cloud: 'gcp'
       exposure: Exposure
-      /** The subnetwork a Cloud Run service egresses through, or a VM sits in. */
+      /**
+       * The subnetwork this role's own resources sit in: a VM, or the internal
+       * address a load balancer answers on. Where its clients are.
+       */
       subnetwork: $util.Output<string>
-      /** The identity firewall rules name, and that IAM grants attach to. */
+      /**
+       * The subnetwork a Cloud Run service's packets leave through, which is a
+       * different question from `subnetwork` and has to stay one.
+       *
+       * A rule admitting a Cloud Run workload to a VM can only name the range
+       * its packets come from, and a range is exactly as narrow as the subnet
+       * behind it — so the serverless roles egress from a subnet holding nothing
+       * else. Reading `subnetwork` here instead would move every resource that
+       * field places, the API's internal address included, into that subnet and
+       * widen the rule to whatever followed. See `CLOUDRUN_EGRESS_CIDR`.
+       */
+      egressSubnetwork: $util.Output<string>
+      /** The identity IAM grants attach to, and that Cloud Run admits invokers by. */
       serviceAccount: $util.Output<string>
     }
 

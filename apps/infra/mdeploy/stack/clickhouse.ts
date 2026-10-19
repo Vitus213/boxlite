@@ -31,6 +31,8 @@ export type ClickHouseRequest = {
   /** Only read when `mode` is self-hosted; a managed endpoint sizes itself. */
   instanceSize: 'small' | 'medium'
   dataGb: number
+  /** TTL of the telemetry tables, already resolved by the stack. */
+  retentionHours: number
 }
 
 /** One account's way in: never a password, always a reference and its version. */
@@ -39,17 +41,6 @@ export type ClickHouseAccount = {
   passwordRef: $util.Output<string>
   credentialVersion: $util.Output<string>
 }
-
-/**
- * What marks a workload as allowed to connect, in the shape its cloud uses.
- *
- * One value on AWS, where a security group admits every member of it at once;
- * a list on GCP, where admission is per identity — so the two callers this
- * database has are two entries there and cannot be collapsed into one.
- */
-export type ClickHouseBinding =
-  | { cloud: 'aws'; clientGrant: $util.Output<string> }
-  | { cloud: 'gcp'; clientGrants: $util.Output<string>[] }
 
 /**
  * A stage that keeps no telemetry.
@@ -68,7 +59,6 @@ export type ClickHouse =
       database: string
       writer: ClickHouseAccount
       reader: ClickHouseAccount
-      binding: ClickHouseBinding
       id: $util.Output<string>
       ready: any[]
     }

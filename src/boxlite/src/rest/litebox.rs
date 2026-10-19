@@ -17,7 +17,8 @@ use crate::BoxInfo;
 use crate::litebox::copy::CopyOptions;
 use crate::litebox::snapshot_mgr::SnapshotInfo;
 use crate::litebox::{
-    AttachOptions, BoxCommand, BoxTunnel, ExecResult, ExecStderr, ExecStdin, ExecStdout, Execution,
+    AttachOptions, BoxCommand, BoxConnection, BoxTunnel, ExecResult, ExecStderr, ExecStdin,
+    ExecStdout, Execution,
 };
 use crate::metrics::BoxMetrics;
 use crate::runtime::backend::{BoxBackend, BoxNetworkBackend, SnapshotBackend};
@@ -335,7 +336,7 @@ impl BoxBackend for RestBox {
             host_src.to_path_buf(),
             boxlite_shared::tar::PackContext {
                 follow_symlinks: opts.follow_symlinks,
-                include_parent: opts.include_parent,
+                include_parent: !boxlite_shared::tar::specifies_current_dir(host_src.as_os_str()),
             },
         )
         .await?;
@@ -533,17 +534,26 @@ impl BoxBackend for RestBox {
 #[async_trait]
 impl BoxNetworkBackend for RestBox {
     async fn tunnel(&self, target: SocketAddr) -> BoxliteResult<BoxTunnel> {
+        let endpoint = self.tunnel_endpoint(target).await?;
+        let client = self.client.clone();
+        Ok(BoxTunnel::new(Some(endpoint.clone()), async move {
+            let connection = client.connect_box_network_tunnel(&endpoint).await?;
+            Ok(BoxConnection::new(connection))
+        }))
+    }
+}
+
+impl RestBox {
+    /// Register `target`'s port as a public tunnel and return its URI.
+    async fn tunnel_endpoint(&self, target: SocketAddr) -> BoxliteResult<String> {
         if target.ip().to_string() != crate::net::constants::GUEST_IP {
             return Err(BoxliteError::Unsupported(
                 "REST box tunnels only support service ports on the guest IP".into(),
             ));
         }
-
-        let port = target.port();
-        let box_id = self.box_id_str();
-        let endpoint = self.client.prepare_box_tunnel(&box_id, port).await?;
-        let connection = self.client.connect_box_network_tunnel(&endpoint).await?;
-        Ok(BoxTunnel::remote(endpoint, connection))
+        self.client
+            .prepare_box_tunnel(&self.box_id_str(), target.port())
+            .await
     }
 }
 
@@ -1404,6 +1414,32 @@ mod tests {
         RestBox::new(client_for(port), resp.to_box_info().expect("to_box_info"))
     }
 
+    /// An owned SSH handle must reject every REST operation even after LiteBox is dropped.
+    #[tokio::test]
+    async fn ssh_control_is_unsupported_on_rest() {
+        let backend = Arc::new(rest_box_for(1, "ssh-test"));
+        let sandbox = crate::LiteBox::new(backend.clone(), backend.clone(), backend);
+        let ssh = sandbox.ssh();
+        drop(sandbox);
+        assert!(matches!(
+            ssh.status().await,
+            Err(BoxliteError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ssh.disable().await,
+            Err(BoxliteError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ssh.configure(crate::SshConfig {
+                listen_address: String::new(),
+                host_private_key: String::new(),
+                accounts: vec![],
+            })
+            .await,
+            Err(BoxliteError::Unsupported(_))
+        ));
+    }
+
     /// Send a minimal HTTP/1.1 200 OK with a JSON body.
     async fn write_status_response(stream: &mut TcpStream, body: &str) {
         let resp = format!(
@@ -1719,6 +1755,49 @@ mod tests {
             "single file must land inside the destination directory"
         );
         server.await.unwrap();
+    }
+
+    /// A copy-out of `SRC/.` — docker's spelling for "the contents, not the
+    /// directory" — has to reach the server *as* `SRC/.`: the server's portal
+    /// reads the trailing dot off the raw path, so a client that normalized it
+    /// away would turn every contents-only copy into a nested one.
+    #[tokio::test]
+    async fn a_contents_only_source_reaches_the_wire_with_its_trailing_dot() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(socket.read_u8().await.unwrap());
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\n\
+                      Content-Type: application/json\r\n\
+                      Content-Length: 2\r\n\
+                      Connection: close\r\n\r\n{}",
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&head)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let _ = rest_box_for(port, "box1")
+            .copy_out("/src/.", dir.path(), CopyOptions::default())
+            .await;
+
+        let request_line = server.await.unwrap();
+        assert!(
+            request_line.starts_with("GET ")
+                && request_line.contains("/boxes/box1/files?path=%2Fsrc%2F. "),
+            "the trailing dot must survive url-encoding: {request_line}"
+        );
     }
 
     /// A destination with a trailing slash names a directory even when it
@@ -2537,5 +2616,55 @@ mod tests {
         );
 
         server.await.unwrap();
+    }
+
+    /// `connect()` opens the tunnel `tunnel()` prepared: one `POST
+    /// /network/tunnel` per tunnel, not a second one for the connection.
+    #[tokio::test]
+    async fn connect_reuses_the_prepared_rest_tunnel() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let posts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_posts = posts.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let posts = server_posts.clone();
+                tokio::spawn(async move {
+                    let head = String::from_utf8(read_request_head(&mut socket).await).unwrap();
+                    if head.starts_with("POST") {
+                        posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let body = format!(r#"{{"uri":"http://127.0.0.1:{port}"}}"#);
+                        let reply = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket.write_all(reply.as_bytes()).await.unwrap();
+                    } else {
+                        socket
+                            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                            .await
+                            .unwrap();
+                        let (mut reader, mut writer) = socket.split();
+                        let _ = tokio::io::copy(&mut reader, &mut writer).await;
+                    }
+                });
+            }
+        });
+
+        let network = crate::litebox::NetworkHandle::new(Arc::new(rest_box_for(port, "tun-box")));
+        let target = format!("{}:3000", crate::net::constants::GUEST_IP);
+        let tunnel = network.tunnel(target.parse().unwrap()).await.unwrap();
+        assert_eq!(
+            tunnel.uri(),
+            Some(format!("http://127.0.0.1:{port}").as_str())
+        );
+
+        let mut connection = tunnel.connect().await.unwrap();
+        connection.write_all(b"ping").await.unwrap();
+        let mut echoed = [0; 4];
+        connection.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"ping");
+        assert_eq!(posts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

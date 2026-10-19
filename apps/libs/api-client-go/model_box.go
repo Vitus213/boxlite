@@ -33,12 +33,17 @@ type Box struct {
 	Env map[string]string `json:"env"`
 	// Labels for the box
 	Labels map[string]string `json:"labels"`
-	// Whether the box http preview is public
+	// Whether inbound access is enabled. Deprecated: read `network.inbound.mode`
+	// Deprecated
 	Public bool `json:"public"`
-	// Whether to block all network access for the box
+	// Whether outbound access is disabled. Deprecated: read `network.outbound.mode`
+	// Deprecated
 	NetworkBlockAll bool `json:"networkBlockAll"`
-	// Comma-separated list of allowed CIDR network addresses for the box
+	// Comma-separated outbound allowlist. Deprecated: read `network.outbound.allow_net`
+	// Deprecated
 	NetworkAllowList *string `json:"networkAllowList,omitempty"`
+	// The network policy in both directions
+	Network *NetworkInfo `json:"network,omitempty"`
 	// The target environment for the box
 	Target string `json:"target"`
 	// The image used for the box
@@ -84,6 +89,8 @@ type Box struct {
 	RunnerId *string `json:"runnerId,omitempty"`
 	// The toolbox proxy URL for the box
 	ToolboxProxyUrl string `json:"toolboxProxyUrl"`
+	// What a box still being created is waiting on. Absent once it has started, and absent while it is being created from an image that has already been pulled
+	Progress *BoxProgress `json:"progress,omitempty"`
 	AdditionalProperties map[string]interface{}
 }
 
@@ -265,6 +272,7 @@ func (o *Box) SetLabels(v map[string]string) {
 }
 
 // GetPublic returns the Public field value
+// Deprecated
 func (o *Box) GetPublic() bool {
 	if o == nil {
 		var ret bool
@@ -276,6 +284,7 @@ func (o *Box) GetPublic() bool {
 
 // GetPublicOk returns a tuple with the Public field value
 // and a boolean to check if the value has been set.
+// Deprecated
 func (o *Box) GetPublicOk() (*bool, bool) {
 	if o == nil {
 		return nil, false
@@ -284,11 +293,13 @@ func (o *Box) GetPublicOk() (*bool, bool) {
 }
 
 // SetPublic sets field value
+// Deprecated
 func (o *Box) SetPublic(v bool) {
 	o.Public = v
 }
 
 // GetNetworkBlockAll returns the NetworkBlockAll field value
+// Deprecated
 func (o *Box) GetNetworkBlockAll() bool {
 	if o == nil {
 		var ret bool
@@ -300,6 +311,7 @@ func (o *Box) GetNetworkBlockAll() bool {
 
 // GetNetworkBlockAllOk returns a tuple with the NetworkBlockAll field value
 // and a boolean to check if the value has been set.
+// Deprecated
 func (o *Box) GetNetworkBlockAllOk() (*bool, bool) {
 	if o == nil {
 		return nil, false
@@ -308,11 +320,13 @@ func (o *Box) GetNetworkBlockAllOk() (*bool, bool) {
 }
 
 // SetNetworkBlockAll sets field value
+// Deprecated
 func (o *Box) SetNetworkBlockAll(v bool) {
 	o.NetworkBlockAll = v
 }
 
 // GetNetworkAllowList returns the NetworkAllowList field value if set, zero value otherwise.
+// Deprecated
 func (o *Box) GetNetworkAllowList() string {
 	if o == nil || IsNil(o.NetworkAllowList) {
 		var ret string
@@ -323,6 +337,7 @@ func (o *Box) GetNetworkAllowList() string {
 
 // GetNetworkAllowListOk returns a tuple with the NetworkAllowList field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// Deprecated
 func (o *Box) GetNetworkAllowListOk() (*string, bool) {
 	if o == nil || IsNil(o.NetworkAllowList) {
 		return nil, false
@@ -340,8 +355,41 @@ func (o *Box) HasNetworkAllowList() bool {
 }
 
 // SetNetworkAllowList gets a reference to the given string and assigns it to the NetworkAllowList field.
+// Deprecated
 func (o *Box) SetNetworkAllowList(v string) {
 	o.NetworkAllowList = &v
+}
+
+// GetNetwork returns the Network field value if set, zero value otherwise.
+func (o *Box) GetNetwork() NetworkInfo {
+	if o == nil || IsNil(o.Network) {
+		var ret NetworkInfo
+		return ret
+	}
+	return *o.Network
+}
+
+// GetNetworkOk returns a tuple with the Network field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *Box) GetNetworkOk() (*NetworkInfo, bool) {
+	if o == nil || IsNil(o.Network) {
+		return nil, false
+	}
+	return o.Network, true
+}
+
+// HasNetwork returns a boolean if a field has been set.
+func (o *Box) HasNetwork() bool {
+	if o != nil && !IsNil(o.Network) {
+		return true
+	}
+
+	return false
+}
+
+// SetNetwork gets a reference to the given NetworkInfo and assigns it to the Network field.
+func (o *Box) SetNetwork(v NetworkInfo) {
+	o.Network = &v
 }
 
 // GetTarget returns the Target field value
@@ -1003,6 +1051,38 @@ func (o *Box) SetToolboxProxyUrl(v string) {
 	o.ToolboxProxyUrl = v
 }
 
+// GetProgress returns the Progress field value if set, zero value otherwise.
+func (o *Box) GetProgress() BoxProgress {
+	if o == nil || IsNil(o.Progress) {
+		var ret BoxProgress
+		return ret
+	}
+	return *o.Progress
+}
+
+// GetProgressOk returns a tuple with the Progress field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *Box) GetProgressOk() (*BoxProgress, bool) {
+	if o == nil || IsNil(o.Progress) {
+		return nil, false
+	}
+	return o.Progress, true
+}
+
+// HasProgress returns a boolean if a field has been set.
+func (o *Box) HasProgress() bool {
+	if o != nil && !IsNil(o.Progress) {
+		return true
+	}
+
+	return false
+}
+
+// SetProgress gets a reference to the given BoxProgress and assigns it to the Progress field.
+func (o *Box) SetProgress(v BoxProgress) {
+	o.Progress = &v
+}
+
 func (o Box) MarshalJSON() ([]byte, error) {
 	toSerialize,err := o.ToMap()
 	if err != nil {
@@ -1023,6 +1103,9 @@ func (o Box) ToMap() (map[string]interface{}, error) {
 	toSerialize["networkBlockAll"] = o.NetworkBlockAll
 	if !IsNil(o.NetworkAllowList) {
 		toSerialize["networkAllowList"] = o.NetworkAllowList
+	}
+	if !IsNil(o.Network) {
+		toSerialize["network"] = o.Network
 	}
 	toSerialize["target"] = o.Target
 	if !IsNil(o.Image) {
@@ -1078,6 +1161,9 @@ func (o Box) ToMap() (map[string]interface{}, error) {
 		toSerialize["runnerId"] = o.RunnerId
 	}
 	toSerialize["toolboxProxyUrl"] = o.ToolboxProxyUrl
+	if !IsNil(o.Progress) {
+		toSerialize["progress"] = o.Progress
+	}
 
 	for key, value := range o.AdditionalProperties {
 		toSerialize[key] = value
@@ -1143,6 +1229,7 @@ func (o *Box) UnmarshalJSON(data []byte) (err error) {
 		delete(additionalProperties, "public")
 		delete(additionalProperties, "networkBlockAll")
 		delete(additionalProperties, "networkAllowList")
+		delete(additionalProperties, "network")
 		delete(additionalProperties, "target")
 		delete(additionalProperties, "image")
 		delete(additionalProperties, "cpu")
@@ -1165,6 +1252,7 @@ func (o *Box) UnmarshalJSON(data []byte) (err error) {
 		delete(additionalProperties, "daemonVersion")
 		delete(additionalProperties, "runnerId")
 		delete(additionalProperties, "toolboxProxyUrl")
+		delete(additionalProperties, "progress")
 		o.AdditionalProperties = additionalProperties
 	}
 

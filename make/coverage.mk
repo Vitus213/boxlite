@@ -53,6 +53,11 @@ coverage\:bindings:
 		-p boxlite-python --no-default-features --lib $(NEXTEST_FILTER) || rc=$$?; \
 	exit $$rc
 
+# Language tests exercise the exported bindings that Rust lib tests cannot see.
+# Keep their profiles separate from the core collector and upload both reports.
+coverage\:bindings\:external: test\:unit\:scripts
+	@bash $(SCRIPT_DIR)/test/coverage-bindings.sh
+
 # Render collected profiles, including partial results from a failed test run.
 coverage\:report:
 	@mkdir -p target/coverage
@@ -61,6 +66,14 @@ coverage\:report:
 
 # Codecov enforces patch coverage against the PR base; total coverage is reported.
 codecov: coverage\:lcov
+
+# Add real KVM execution to the unit profiles before the CI upload. The CI
+# profile bounds each test; disabling retries preserves the first failure.
+coverage\:vmm\:kvm: _ensure-kvm
+	@cargo llvm-cov nextest --no-report --no-tests=fail --profile ci --retries 0 \
+		-p boxlite-hypervisor -p boxlite-vmm --lib --run-ignored only --test-threads=1 \
+		-E 'test(vm::tests::)'
+	@cargo llvm-cov report $(COVERAGE_REPORT_ARGS) --lcov --output-path target/coverage/lcov.info
 
 # Go's reports include every package, including packages with no tests.
 coverage\:go: dev\:go
@@ -72,6 +85,8 @@ coverage\:go: dev\:go
 		-coverprofile="$(PROJECT_ROOT)/target/coverage/gvproxy.out" $(GOTEST_FILTER) ./...) || rc=$$?; \
 	(cd apps/runner && GOFLAGS=-tags=boxlite_dev go test -covermode=atomic -coverpkg=./... \
 		-coverprofile="$(PROJECT_ROOT)/target/coverage/runner.out" $(GOTEST_FILTER) ./...) || rc=$$?; \
+	(cd apps/image-service && go test -covermode=atomic -coverpkg=./... \
+		-coverprofile="$(PROJECT_ROOT)/target/coverage/image-service.out" $(GOTEST_FILTER) ./...) || rc=$$?; \
 	exit $$rc
 
 coverage\:python: _ensure-python-deps
