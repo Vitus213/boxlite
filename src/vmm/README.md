@@ -5,14 +5,16 @@ the host VM and registers guest RAM. The crate-visible VM and vCPU `run` entry
 points still sketch event dispatch, guest exits, and worker cleanup with inline
 `todo!()` operations that panic if called; vCPU exits use
 `boxlite_hypervisor::VcpuExit`, and `Error` wraps `boxlite_hypervisor::Error`
-with its cause chain intact. This crate cannot boot a kernel yet. The
+with its cause chain intact. The address buses and the device interrupt path
+are implemented; no device is registered on them yet. This crate cannot boot a
+kernel yet. The
 [VMM design](../../docs/contributing/architecture/vmm/README.md) specifies the
 lifecycle API, memory layout, buses, interrupts, and threads it will implement.
 
-The lifecycle types and `Error` remain crate-visible while those entry points
-are placeholders. M1 will make the implemented `Vm`, `VmExit`, `Error` and
-`Result` public together; M2's engine adapter will then consume that API and
-inspect the error's host cause.
+`Error`, `Result`, `bus` and `irq` are public so device slices and M2's engine
+adapter can use them. The lifecycle types `Vm` and `VmExit` stay crate-visible
+until the lifecycle task implements them; M2's engine adapter will then consume
+that API and inspect the error's host cause.
 
 ```text
 boxlite-vmm
@@ -27,13 +29,30 @@ boxlite-vmm
 | `error` | VMM errors that keep the hypervisor's cause chain |
 | `memory` | `GuestRam`: owned guest RAM, the RAM layout, and the registration lifetime rules |
 | `vcpu` | Worker threads, stop coordination, and exit handling |
-| `irq` | Device interrupt assignment and routing; HVF and KVM provide the controller, WHP (M10) only local APICs |
-| `bus` | Address-range registration and device I/O dispatch |
+| `irq` | `IrqSender`, the device interrupt path, over any backend `Vm`; HVF and KVM provide the controller, WHP (M10) only local APICs |
+| `bus` | `Bus` (MMIO) and, on x86_64, `IoBus` (ports): window registration and device I/O dispatch |
 
 Backend implementation and guest boot follow in M1. Virtio devices, the BoxLite
 engine adapter, engine selection, and `native` feature wiring follow in M2.
 Neither new crate depends on `boxlite-shared`, and both are unpublished while
 their interfaces are being established.
+
+## Buses and interrupts
+
+Devices implement `BusDevice` and see offsets from their window's base.
+`insert` rejects a zero-sized window, a window that runs past the end of its
+address space (`InvalidWindow`), and any overlap (`Overlap`, or `IoOverlap` on
+the port bus); adjacent windows are allowed. An access must land wholly inside
+one window: a split or unmapped access returns `Unmapped`/`IoUnmapped`, and a
+poisoned device lock returns `DevicePoisoned`. Whether the vCPU loop treats
+those as fatal or ignores them, as Firecracker and crosvm do for stray port
+I/O, is decided with the loop. A vCPU thread holds a device's lock for one
+register access.
+
+`IrqSender` wraps any `InterruptTarget`; every `boxlite_hypervisor::Vm`
+implements it, so the lifecycle hands its backend VM to devices directly.
+`set_level` holds a level-triggered line; `trigger_edge` is a set followed by a
+clear and reports a failed clear rather than hiding a stuck line.
 
 ## Guest RAM
 
