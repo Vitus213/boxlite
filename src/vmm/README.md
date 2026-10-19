@@ -6,8 +6,8 @@ points still sketch event dispatch, guest exits, and worker cleanup with inline
 `todo!()` operations that panic if called; vCPU exits use
 `boxlite_hypervisor::VcpuExit`, and `Error` wraps `boxlite_hypervisor::Error`
 with its cause chain intact. The address buses and the device interrupt path
-are implemented; no device is registered on them yet. This crate cannot boot a
-kernel yet. The
+are implemented, as are the x86_64 serial console and i8042 reset; the lifecycle
+does not register them yet. This crate cannot boot a kernel yet. The
 [VMM design](../../docs/contributing/architecture/vmm/README.md) specifies the
 lifecycle API, memory layout, buses, interrupts, and threads it will implement.
 
@@ -19,7 +19,8 @@ that API and inspect the error's host cause.
 ```text
 boxlite-vmm
 ├── boxlite-hypervisor
-└── vm-memory
+├── vm-memory
+└── vm-superio (x86_64)
 ```
 
 | Module | Planned responsibility |
@@ -31,6 +32,7 @@ boxlite-vmm
 | `vcpu` | Worker threads, stop coordination, and exit handling |
 | `irq` | `IrqSender`, the device interrupt path, over any backend `Vm`; HVF and KVM provide the controller, WHP (M10) only local APICs |
 | `bus` | `Bus` (MMIO) and, on x86_64, `IoBus` (ports): window registration and device I/O dispatch |
+| `devices` | x86_64 legacy devices: the 8250 serial console and the i8042 reset |
 
 Backend implementation and guest boot follow in M1. Virtio devices, the BoxLite
 engine adapter, engine selection, and `native` feature wiring follow in M2.
@@ -53,6 +55,23 @@ register access.
 implements it, so the lifecycle hands its backend VM to devices directly.
 `set_level` holds a level-triggered line; `trigger_edge` is a set followed by a
 clear and reports a failed clear rather than hiding a stuck line.
+
+## x86_64 legacy devices
+
+M1 reuses `vm-superio` 0.8.2 for the protocols and keeps only BoxLite's side
+in `devices`: bus offsets, interrupt delivery and reset reporting.
+
+| Device | Ports | BoxLite adapter |
+| --- | --- | --- |
+| 8250 serial (16550A) | `0x3F8`–`0x3FF`, GSI 4 | output to a `Write` sink; `vm-superio` signals each new interrupt once, so `IrqTrigger` sends an edge; `enqueue_input` feeds the receive FIFO |
+| i8042, reset only | one window at `0x60`: data at offset 0, command at offset 4 | `0xFE` on the command port sets the reset flag through `ResetTrigger`; reads are `0` |
+
+No guest keyboard is configured in M1, so the i8042 emulates no keyboard
+protocol. The reset is a flag, not a stop: the vCPU loop checks it right after
+dispatching each port write, before re-entering the guest, because Linux
+otherwise falls back to port `0xCF9` and a triple fault. A port write has no
+error path back to the guest, so a failing console sink or interrupt injection
+drops that byte or edge.
 
 ## Guest RAM
 

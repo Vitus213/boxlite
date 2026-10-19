@@ -4,7 +4,8 @@
 //! Native VMM skeleton with VM and vCPU entry points.
 //! `Vm::new` validates the configuration, creates the host VM and registers
 //! guest RAM; the `run` entry points are placeholders that panic if called.
-//! The address buses and the device interrupt path are implemented.
+//! The address buses, the device interrupt path, and the x86_64 serial
+//! console and i8042 reset are implemented.
 //!
 //! The VMM owns the guest machine and delegates host operations to
 //! `boxlite-hypervisor`. BoxLite runtime integration belongs in its engine adapter.
@@ -15,6 +16,8 @@ pub mod bus;
     expect(dead_code, reason = "Only the unwired Vm::new uses it.")
 )]
 mod config;
+#[cfg(target_arch = "x86_64")]
+pub mod devices;
 pub mod error;
 pub mod irq;
 #[cfg_attr(
