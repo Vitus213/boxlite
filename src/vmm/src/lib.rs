@@ -15,12 +15,9 @@
     expect(dead_code, reason = "Vm::new does not load the kernel yet.")
 )]
 mod boot;
-#[cfg_attr(not(test), expect(dead_code, reason = "No device sits on a bus yet."))]
+#[cfg_attr(not(test), expect(dead_code, reason = "No VM dispatches exits yet."))]
 mod bus;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "No platform builds a chipset yet.")
-)]
+#[cfg_attr(not(test), expect(dead_code, reason = "No VM builds a chipset yet."))]
 mod chipset;
 #[cfg_attr(
     not(test),
@@ -33,10 +30,12 @@ mod config;
     expect(dead_code, reason = "vCPU workers are not wired yet.")
 )]
 mod cpu_features;
+#[cfg_attr(not(test), expect(dead_code, reason = "No VM adds devices yet."))]
+mod devices;
 mod error;
-#[cfg_attr(not(test), expect(dead_code, reason = "No device sends an event yet."))]
+#[cfg_attr(not(test), expect(dead_code, reason = "No VM waits on events yet."))]
 mod events;
-#[cfg_attr(not(test), expect(dead_code, reason = "No device raises a line yet."))]
+#[cfg_attr(not(test), expect(dead_code, reason = "No VM adds devices yet."))]
 mod irq;
 #[cfg_attr(
     not(test),
