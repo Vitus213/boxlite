@@ -31,6 +31,7 @@ boxlite-vmm
 | `memory` | `GuestRam`: owned guest RAM, the RAM layout, and the registration lifetime rules |
 | `cpu_features` | x86_64 guest CPUID for each vCPU and the boot MSRs |
 | `vcpu` | Worker threads, stop coordination, and exit handling |
+| `chipset` | `ChipsetBuilder`, the one registry of ranges and interrupt lines, and `Chipset`, the read-only machine it builds |
 | `bus` | `Bus`, `BusRange` and `BusDevice`, and `Buses::dispatch`, which serves the MMIO and port exits of a vCPU |
 | `irq` | `IrqChip`, the host interrupt controller as devices see it, and `IrqLine`, one device line; HVF and KVM provide the controller, WHP (M10) only local APICs |
 | `events` | `Event`, which ends the VM, `EventSender`, and `EventLoop`, the poller that waits for the first event |
@@ -270,6 +271,32 @@ These are the pieces devices are built from; no device uses them yet.
   second in case a wake-up was lost. Every event ends the VM; the VMM never
   restarts a guest.
 
+## Chipset
+
+`chipset::ChipsetBuilder` is the one registry of port ranges, MMIO ranges and
+interrupt lines, as OpenVMM's chipset builder is. Platform code reserves the
+windows the host serves in the kernel, then adds each device by name with a
+closure that claims the device's resources from a `Resources` handle and
+returns the device. `build` reports every conflict at once, naming both sides,
+or returns an immutable `Chipset` that owns the devices:
+
+```text
+5 chipset conflict(s): intruder claims port range 0x3fe+0x4, held by com1; intruder claims port range 0x42+0x1, held by in-kernel PIT; intruder claims MMIO range 0xfee00800+0x10, held by in-kernel local APIC; intruder claims MMIO range 0x1000+0x0, which is empty or wraps; intruder claims interrupt line 4, held by com1;
+```
+
+- **Claims.** A claim never fails: `Resources` records it, so the closure
+  always finishes and every later claim is still checked. `pio_at` gives a
+  range the register offset it starts at, for a controller whose ports are
+  not contiguous.
+- **Constructors.** A constructor only claims resources and builds state; a
+  device that needs a thread starts it after `build`. A line from
+  `Resources::line` stays inert until `build` succeeds: using it earlier fails
+  without a host call, so a device that a conflict discards never raised
+  anything. On a conflict, every device drops without having run.
+- **Dispatch.** `Chipset::dispatch` hands a vCPU exit to the buses and
+  returns every exit that is not MMIO or port I/O. The chipset never changes
+  after the build, so every vCPU thread shares it without a lock of its own.
+
 ## Build
 
 `make vmm:boot` builds the pinned x86_64 ELF kernel (`vmlinux`) inside a pinned
@@ -294,10 +321,12 @@ segments from the GDT in RAM, reads markers at RSI and at the top of RAM, and
 stores RFLAGS, CR0, CR3, CR4, EFER, CPUID leaves 1 and 0xB, MISC_ENABLE and
 MTRRdefType for the test to compare. The 3 GiB allocation is `MAP_NORESERVE`, so only the touched
 pages are committed; a host with `vm.overcommit_memory=2` refuses it. The
-[bus](#buses-lines-and-events) tests in `tests::kvm` modules need 2 MiB: a
-flat 32-bit guest writes and reads a test device on the port bus at its
-register offset, and an `IrqLine` sets GSI 4 and 5 through `KVM_IRQ_LINE`,
-skipping a repeated level. CI runs the same tests through
+[bus](#buses-lines-and-events) and [chipset](#chipset) tests in `tests::kvm`
+modules need 2 MiB: a flat 32-bit guest writes and reads a test device on the
+port bus at its register offset, and an `IrqLine` sets GSI 4 and 5 through
+`KVM_IRQ_LINE`, skipping a repeated level. Another flat guest reads a claimed
+and an unclaimed port of a built chipset, and the device's line, armed by the
+build, reaches KVM. CI runs the same tests through
 `make coverage:vmm:kvm`.
 
 With the corresponding Rust targets installed, the crate can also be compiled
