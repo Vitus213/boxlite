@@ -35,7 +35,7 @@ boxlite-vmm
 | `chipset` | `ChipsetBuilder`, the one registry of ranges and interrupt lines, and `Chipset`, the read-only machine it builds |
 | `bus` | `Bus`, `BusRange` and `BusDevice`, and `Buses::dispatch`, which serves the MMIO and port exits of a vCPU |
 | `irq` | `IrqChip`, the host interrupt controller as devices see it, and `IrqLine`, one device line; HVF and KVM provide the controller, WHP (M10) only local APICs |
-| `devices` | The console queue, and on x86_64 the 8250 UART at COM1 and the i8042 reset, with `add_legacy`, which adds them to the chipset |
+| `devices` | The console queue, and on x86_64 the 8250 UART at COM1, the CMOS RTC and the i8042 reset, with `add_legacy`, which adds them to the chipset |
 | `events` | `Event`, which ends the VM, `EventSender`, and `EventLoop`, the poller that waits for the first event |
 
 Backend implementation and guest boot follow in M1. Virtio devices, the BoxLite
@@ -182,7 +182,8 @@ make test:integration:vmm:linux
 
 Each runs `prepare` for 256 MiB of RAM, then runs each KVM vCPU on its own
 thread with its guest CPUID and the boot MSRs on the
-[legacy devices](#legacy-devices-and-the-console). Every vCPU is created
+[legacy devices](#legacy-devices-and-the-console), with the CMOS RTC stopped
+at 2026-01-02T03:04:05Z. Every vCPU is created
 before any runs, and only vCPU 0 gets the entry registers. Each thread serves
 its exits through `Chipset::dispatch` and looks for an event before it enters
 the guest again, so the vCPU that served the exit sending the first event
@@ -207,9 +208,10 @@ serial log so far.
   then reports CPU i, the log must show `exitcode=0x00000f00`.
 - With `console=ttyS0 panic=-1 reboot=k`, one vCPU and an `/init` that
   prints a line, waits for the tty to send it and restarts the machine, the
-  log must show the 16550A on IRQ 4, that line and
-  `reboot: Restarting system`, in that order, and GSI 4 must have been
-  raised.
+  log must show the 16550A on IRQ 4, `rtc_cmos rtc_cmos: setting system
+  clock to 2026-01-02T03:04:05 UTC (1767323045)`, that line and
+  `reboot: Restarting system`, in that order. GSI 4 must have been raised,
+  and the only access no device claimed must be the read of port `0x87`.
 - The same boot with a console sink that takes nothing until the run has
   ended, and a 4 KiB queue, must still end with `GuestReset`. The queue drops
   the oldest bytes and counts them; the sink then gets the batch the worker
@@ -326,6 +328,7 @@ windows, then adds the legacy devices:
 | Ports | Device | Behaviour |
 | --- | --- | --- |
 | `0x3F8`–`0x3FF` | `com1`, vm-superio's 16550A | Output goes to the console queue; a pending, enabled THRE or RDA raises an edge on GSI 4; no input yet |
+| `0x70`–`0x71` | `cmos` | See [CMOS RTC](#cmos-rtc) |
 | `0x60`, `0x64` | `i8042`, vm-superio's controller | Reads 0; the first `0xFE` at `0x64` sends `GuestReset` |
 
 - vm-superio must be 0.8.2 or later. It raises THRE on every IER write, so
@@ -344,6 +347,33 @@ windows, then adds the legacy devices:
   worker holds included, as dropped.
 - A failed interrupt sends `DeviceFailed`, once.
 - The guest kernel has no i8042 driver, so the reset is all the device does.
+
+## CMOS RTC
+
+On x86_64, `devices::cmos::CmosRtc` is the MC146818 behind ports `0x70`
+(index) and `0x71` (data). Linux reads it once at boot through
+`RTC_HCTOSYS`; the boot wall clock itself comes from kvmclock.
+
+- The time is an injected `Clock` plus an offset that keeps any time the
+  guest sets. `cmos::host_clock` reads the host wall clock; the tests inject
+  a fixed time.
+- As in QEMU, the time registers hold still while register B's SET bit or a
+  divider reset in register A stops the clock.
+- On any release the written time resumes half a second into its second,
+  because Linux writes half a second early (`set_offset_nsec` in
+  `rtc-cmos.c`). QEMU adds the half second only when the divider restarts
+  and otherwise keeps the old phase, which would put a Linux write on AMD,
+  where only SET is used, up to half a second off.
+- A write while the clock runs takes effect at once.
+- Time registers read in BCD unless register B selects binary. Only 24-hour
+  mode is modelled, so register B always reads with that bit set.
+- Register A starts at `0x26` and never reports an update in progress;
+  register C reads 0 and register D reads `0x80`. The remaining bytes are
+  NVRAM.
+- Linux writes the century byte only through ACPI, so a two-digit year
+  00–69 means 20xx and 70–99 means 19xx unless the guest writes it.
+- There is no IRQ 8, so alarm, update and periodic interrupts never fire:
+  `hwclock` in the guest waits 10 s for an update interrupt and fails.
 
 ## Build
 
@@ -375,8 +405,9 @@ port bus at its register offset, and an `IrqLine` sets GSI 4 and 5 through
 `KVM_IRQ_LINE`, skipping a repeated level. Another flat guest reads a claimed
 and an unclaimed port of a built chipset, and the device's line, armed by the
 build, reaches KVM. A third runs on the [legacy devices](#legacy-devices-and-the-console):
-it prints `OK` on COM1, reads an unclaimed port and unmapped MMIO as all
-ones, and runs no instruction after its i8042 reset. CI runs the same tests through
+it prints `OK` on COM1, reads the CMOS seconds from a fixed clock, reads an
+unclaimed port and unmapped MMIO as all ones, and runs no instruction after
+its i8042 reset. CI runs the same tests through
 `make coverage:vmm:kvm`.
 
 With the corresponding Rust targets installed, the crate can also be compiled

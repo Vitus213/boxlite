@@ -183,6 +183,8 @@ const LINUX_CMDLINE: &str = "earlycon=uart8250,io,0x3f8 keep_bootcon panic=-1 re
 const CONSOLE_CMDLINE: &str = "console=ttyS0 panic=-1 reboot=k";
 /// How long a real-kernel boot may take before the watchdog ends it.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The time the CMOS RTC reports, 2026-01-02T03:04:05Z, in nanoseconds.
+const CMOS_TIME: i64 = 1_767_323_045_000_000_000;
 
 /// `vcpu_count` vCPUs and 256 MiB of RAM for `kernel` and `initramfs`,
 /// booted with `cmdline`.
@@ -299,17 +301,23 @@ struct LinuxRun {
     /// The console worker, still running: a test finishes it once its sink
     /// can take the rest.
     console: ConsoleWorker,
-    /// Every exit the vCPUs made, and the port writes to COM1 among them.
+    /// Every exit the vCPUs made, the port writes to COM1 among them, and
+    /// the accesses to the CMOS ports.
     exits: u64,
     serial_writes: u64,
+    cmos_accesses: u64,
     /// How long the guest ran.
     elapsed: Duration,
-    /// Reads and writes no device claimed, on the port bus.
-    unclaimed_ports: (u64, u64),
+    /// Each port access no device claimed, as the port and whether it was a
+    /// write, and the MMIO reads and writes no device claimed. A port access
+    /// is matched to its exit by the bus counter, so the list is exact only
+    /// on one vCPU.
+    unclaimed_ports: Vec<(u16, bool)>,
+    unclaimed_mmio: (u64, u64),
 }
 
 /// Boots `config` on KVM, one thread per vCPU, and the legacy devices, with
-/// the serial port on `console`, until a device event ends the run or
+/// the CMOS RTC stopped at `CMOS_TIME` and the serial port on `console`, until a device event ends the run or
 /// `timeout` passes. Every vCPU exists before any runs, and only vCPU 0 gets
 /// the entry registers; the others wait for the INIT and SIPI Linux sends
 /// them. Each vCPU looks for an event before it enters the guest, and the
@@ -345,12 +353,14 @@ fn run_linux(
     let events = EventLoop::new().unwrap();
     let (writer, console) = ConsoleWorker::spawn(console.sink, console.capacity).unwrap();
     let mut builder = ChipsetBuilder::new(irqs.clone(), events.sender());
-    add_legacy(&mut builder, writer).unwrap();
+    add_legacy(&mut builder, writer, Box::new(|| CMOS_TIME)).unwrap();
     let chipset = builder.build().unwrap();
 
     let count = config.vcpu_count;
     let events = Mutex::new(events);
-    let (exits, serial_writes) = (AtomicU64::new(0), AtomicU64::new(0));
+    let (exits, serial_writes, cmos_accesses) =
+        (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
+    let unclaimed_ports = Mutex::new(Vec::new());
     // `None` while the guest runs, then the event, the timeout or the first
     // failure.
     let outcome = Mutex::new(None::<Result<Option<Event>, String>>);
@@ -370,8 +380,8 @@ fn run_linux(
     thread::scope(|scope| {
         for index in 0..count {
             let (vm, setup, kicks, barrier) = (&vm, &setup, &kicks, &barrier);
-            let (chipset, events, exits, serial_writes) =
-                (&chipset, &events, &exits, &serial_writes);
+            let (chipset, events, unclaimed_ports) = (&chipset, &events, &unclaimed_ports);
+            let (exits, serial_writes, cmos_accesses) = (&exits, &serial_writes, &cmos_accesses);
             let (stop, is_stopped) = (&stop, &is_stopped);
             scope.spawn(move || {
                 let vcpu = vm.create_vcpu(index.into()).and_then(|mut vcpu| {
@@ -400,11 +410,23 @@ fn run_linux(
                         Ok(VcpuExit::Interrupted) => {}
                         Ok(exit) => {
                             exits.fetch_add(1, Ordering::Relaxed);
-                            if let VcpuExit::IoOut { port: 0x3f8, .. } = &exit {
+                            let port = match &exit {
+                                VcpuExit::IoIn { port, .. } => Some((*port, false)),
+                                VcpuExit::IoOut { port, .. } => Some((*port, true)),
+                                _ => None,
+                            };
+                            if port == Some((0x3f8, true)) {
                                 serial_writes.fetch_add(1, Ordering::Relaxed);
                             }
+                            if port.is_some_and(|(port, _)| port & !1 == 0x70) {
+                                cmos_accesses.fetch_add(1, Ordering::Relaxed);
+                            }
+                            let before = chipset.buses().pio.unclaimed();
                             if let Some(exit) = chipset.dispatch(exit) {
                                 stop(Err(format!("vCPU {index}: {exit:?}")));
+                            }
+                            if chipset.buses().pio.unclaimed() != before {
+                                unclaimed_ports.lock().unwrap().extend(port);
                             }
                         }
                         Err(error) => stop(Err(format!("vCPU {index}: {error:?}"))),
@@ -424,7 +446,7 @@ fn run_linux(
         }
     });
     let elapsed = started.elapsed();
-    let unclaimed_ports = chipset.buses().pio.unclaimed();
+    let unclaimed_mmio = chipset.buses().mmio.unclaimed();
     drop(chipset);
     ram.unmap(&*vm).unwrap();
     let end = outcome
@@ -439,8 +461,10 @@ fn run_linux(
         console,
         exits: exits.into_inner(),
         serial_writes: serial_writes.into_inner(),
+        cmos_accesses: cmos_accesses.into_inner(),
         elapsed,
-        unclaimed_ports,
+        unclaimed_ports: unclaimed_ports.into_inner().unwrap(),
+        unclaimed_mmio,
     }
 }
 
@@ -453,12 +477,14 @@ fn assert_reset(run: &LinuxRun, log: &str) {
         run.end
     );
     eprintln!(
-        "boot: {:?}, {} exits, {} COM1 writes, {} GSI 4 edges, {:?} unclaimed port accesses, {} console bytes dropped",
+        "boot: {:?}, {} exits, {} COM1 writes, {} CMOS accesses, {} GSI 4 edges, unclaimed ports {:x?} and MMIO {:?}, {} console bytes dropped",
         run.elapsed,
         run.exits,
         run.serial_writes,
+        run.cmos_accesses,
         run.gsi_4_edges,
         run.unclaimed_ports,
+        run.unclaimed_mmio,
         run.console.dropped_bytes()
     );
 }
@@ -714,8 +740,10 @@ const INIT_MARKER: &str = "INIT-MARKER-0123456789ABCDEF";
 
 /// Boots the kernel named by `VMM_KERNEL` with its console on the 8250 driver
 /// and an `/init` that prints `INIT_MARKER` and restarts the machine. Linux
-/// must find a 16550A on IRQ 4, `/init`'s line must leave through the tty,
-/// and the restart must end the run with the i8042 reset.
+/// must find a 16550A on IRQ 4 and set its clock from the CMOS RTC, `/init`'s
+/// line must leave through the tty, and the restart must end the run with
+/// the i8042 reset. The only access no device claims is Linux's probe of the
+/// ISA DMA page register at 0x87.
 #[test]
 #[ignore = "requires Linux x86_64 with access to /dev/kvm and VMM_KERNEL naming an x86_64 vmlinux"]
 fn boots_linux_on_the_legacy_devices_until_init_restarts() {
@@ -737,6 +765,7 @@ fn boots_linux_on_the_legacy_devices_until_init_restarts() {
         &log,
         &[
             &serial_probe_line(),
+            "rtc_cmos rtc_cmos: setting system clock to 2026-01-02T03:04:05 UTC (1767323045)",
             INIT_MARKER,
             "reboot: Restarting system",
         ],
@@ -744,6 +773,12 @@ fn boots_linux_on_the_legacy_devices_until_init_restarts() {
     assert!(!log.contains("Kernel panic"), "{log}");
     assert!(run.gsi_4_edges > 0);
     assert_eq!(run.console.dropped_bytes(), 0);
+    assert!(
+        run.cmos_accesses > 0,
+        "Linux reads the RTC through 0x70 and 0x71"
+    );
+    assert_eq!(run.unclaimed_ports, [(0x87, false)], "{log}");
+    assert_eq!(run.unclaimed_mmio, (0, 0));
 }
 
 /// The line Linux prints when it finds COM1 at its port and GSI.
