@@ -19,6 +19,7 @@ boxlite-vmm
 ├── boxlite-hypervisor
 ├── mio (the event loop's poller)
 ├── vm-memory
+├── vm-superio (x86_64: the 8250 UART and the i8042, 0.8.2 or later)
 └── linux-loader (Linux x86_64 ELF loading and boot parameters)
 ```
 
@@ -34,6 +35,7 @@ boxlite-vmm
 | `chipset` | `ChipsetBuilder`, the one registry of ranges and interrupt lines, and `Chipset`, the read-only machine it builds |
 | `bus` | `Bus`, `BusRange` and `BusDevice`, and `Buses::dispatch`, which serves the MMIO and port exits of a vCPU |
 | `irq` | `IrqChip`, the host interrupt controller as devices see it, and `IrqLine`, one device line; HVF and KVM provide the controller, WHP (M10) only local APICs |
+| `devices` | The console queue, and on x86_64 the 8250 UART at COM1 and the i8042 reset, with `add_legacy`, which adds them to the chipset |
 | `events` | `Event`, which ends the VM, `EventSender`, and `EventLoop`, the poller that waits for the first event |
 
 Backend implementation and guest boot follow in M1. Virtio devices, the BoxLite
@@ -178,30 +180,47 @@ The boot tests need Linux x86_64, read/write `/dev/kvm` and the same
 make test:integration:vmm:linux
 ```
 
-Each runs `prepare` for 256 MiB of RAM and the command line
-`earlycon=uart8250,io,0x3f8 keep_bootcon panic=-1 reboot=k`, then runs each
-KVM vCPU on its own thread with its guest CPUID and the boot MSRs. Every vCPU
-is created before any runs, and only vCPU 0 gets the entry registers. A
-test-local stub stands in for the devices: it keeps the earlycon bytes written
-to `0x3f8`, reports the UART as idle on `0x3fd`, reads every other port and
-MMIO address as zero, and ignores other writes. Each run ends when a vCPU
-writes `0xFE` to the i8042 port `0x64`, the reset `reboot=k` asks for after a
-panic, and every vCPU is then kicked; an unexpected exit or a watchdog after 30
-seconds also ends it, so a failed boot reports the log so far.
+Each runs `prepare` for 256 MiB of RAM, then runs each KVM vCPU on its own
+thread with its guest CPUID and the boot MSRs on the
+[legacy devices](#legacy-devices-and-the-console). Every vCPU is created
+before any runs, and only vCPU 0 gets the entry registers. Each thread serves
+its exits through `Chipset::dispatch` and looks for an event before it enters
+the guest again, so the vCPU that served the exit sending the first event
+runs no instruction after it; every vCPU is then kicked. A watchdog kicks
+them at the timeout, 30 seconds unless stated, so a hung boot fails with the
+serial log so far.
 
-- On one vCPU without an initramfs, the log must show the kernel version, the exact
+- With `earlycon=uart8250,io,0x3f8 keep_bootcon panic=-1 reboot=k`, one
+  vCPU and no initramfs, the log must show the kernel version, the exact
   command line, the two E820 entries, the memory total and
   `VFS: Unable to mount root fs`.
-- On one vCPU with a generated archive whose `/init`, a 132-byte static ELF, calls
-  `exit_group(42)`, the log must show the `RAMDISK:` range from the zero page,
-  `Unpacking initramfs...`, `Run /init as init process` and
+- With the same command line, one vCPU and a generated archive whose
+  `/init`, a 132-byte static ELF, calls `exit_group(42)`, the log must show
+  the `RAMDISK:` range from the zero page, `Unpacking initramfs...`,
+  `Run /init as init process` and
   `Attempted to kill init! exitcode=0x00002a00`, in that order.
-- On four vCPUs without an initramfs, the log must show the MP table at
-  `0x9fc00`, `Processor #0` to `#3`, the IOAPIC with ID 5 and GSI 0-23,
-  `smp: Brought up 1 node, 4 CPUs`, and no unstable TSC.
-- On four vCPUs with an `/init` that pins itself to each CPU in turn with
-  `sched_setaffinity` and sets bit i when `getcpu` then reports CPU i, the log
-  must show `exitcode=0x00000f00`.
+- With the same command line on four vCPUs and no initramfs, the log must
+  show the MP table at `0x9fc00`, `Processor #0` to `#3`, the IOAPIC with ID
+  5 and GSI 0-23, `smp: Brought up 1 node, 4 CPUs`, and no unstable TSC.
+- With the same command line on four vCPUs and an `/init` that pins itself
+  to each CPU in turn with `sched_setaffinity` and sets bit i when `getcpu`
+  then reports CPU i, the log must show `exitcode=0x00000f00`.
+- With `console=ttyS0 panic=-1 reboot=k`, one vCPU and an `/init` that
+  prints a line, waits for the tty to send it and restarts the machine, the
+  log must show the 16550A on IRQ 4, that line and
+  `reboot: Restarting system`, in that order, and GSI 4 must have been
+  raised.
+- The same boot with a console sink that takes nothing until the run has
+  ended, and a 4 KiB queue, must still end with `GuestReset`. The queue drops
+  the oldest bytes and counts them; the sink then gets the batch the worker
+  held when it stalled and the newest 4 KiB, with the restart line.
+- The same boot with every interrupt dropped must log
+  `Run /init as init process` but not the start of `/init`'s line, and end at
+  a 3-second timeout. Against vm-superio 0.8.1 it fails: the first 16 bytes
+  leave without IRQ 4.
+
+Each run but the last must end with `GuestReset`: `panic=-1 reboot=k` turns a
+panic, and the restart, into the i8042 reset.
 
 ## Long-mode entry
 
@@ -243,7 +262,8 @@ vCPU; Linux programs LINT1 itself.
 
 ## Buses, lines and events
 
-These are the pieces devices are built from; no device uses them yet.
+These are the pieces the [legacy devices](#legacy-devices-and-the-console)
+are built from; no VM wires them up yet.
 
 - **Buses.** `bus::Bus` maps non-overlapping `BusRange`s, each named by its
   owner, to a `BusDevice` and the register offset the device sees at the
@@ -303,6 +323,34 @@ devices:
   returns every exit that is not MMIO or port I/O. The chipset never changes
   after the build, so every vCPU thread shares it without a lock of its own.
 
+## Legacy devices and the console
+
+On x86_64, `devices::x86_64::add_legacy` reserves the in-kernel PIC
+(`0x20`, `0xA0`, `0x4D0`), PIT (`0x40`–`0x43`, `0x61`), IOAPIC and local APIC
+windows, then adds the legacy devices:
+
+| Ports | Device | Behavior |
+| --- | --- | --- |
+| `0x3F8`–`0x3FF` | `com1`, vm-superio's 16550A | Output goes to the console queue; a pending, enabled THRE or RDA raises an edge on GSI 4; no input yet |
+| `0x60`, `0x64` | `i8042`, vm-superio's controller | Reads 0; the first `0xFE` at `0x64` sends `GuestReset` |
+
+- vm-superio must be 0.8.2 or later. It raises THRE on every IER write, so
+  Linux's 8250 driver passes its THRE and TXEN probes and sends tty output on
+  IRQ 4. Against 0.8.1 the driver enables `UART_BUG_TXEN` and sends 16 bytes
+  without the interrupt.
+- The serial port writes into `devices::console::ConsoleWriter`, a bounded
+  queue of 64 KiB, and returns at once; a `console` thread writes the queue to
+  the sink. A full queue drops its oldest bytes, as the kernel's own log ring
+  does, and counts them, so a stalled or failing sink never stalls the guest.
+  A batch the sink refuses and a write after `finish` count as dropped too;
+  a queue of 0 bytes is refused.
+- `ConsoleWorker::finish` closes the queue and waits up to 1 s for the worker
+  to write the rest. A sink write cannot be cancelled, so after that it leaves
+  the worker behind and counts every byte the sink never took, the batch the
+  worker holds included, as dropped.
+- A failed interrupt sends `DeviceFailed`, once.
+- The guest kernel has no i8042 driver, so the reset is all the device does.
+
 ## Build
 
 `make vmm:boot` builds the pinned x86_64 ELF kernel (`vmlinux`) inside a pinned
@@ -332,7 +380,9 @@ modules need 2 MiB: a flat 32-bit guest writes and reads a test device on the
 port bus at its register offset, and an `IrqLine` sets GSI 4 and 5 through
 `KVM_IRQ_LINE`, skipping a repeated level. Another flat guest reads a claimed
 and an unclaimed port of a built chipset, and the device's line, armed by the
-build, reaches KVM. CI runs the same tests through
+build, reaches KVM. A third runs on the [legacy devices](#legacy-devices-and-the-console):
+it prints `OK` on COM1, reads an unclaimed port and unmapped MMIO as all
+ones, and runs no instruction after its i8042 reset. CI runs the same tests through
 `make coverage:vmm:kvm`.
 
 With the corresponding Rust targets installed, the crate can also be compiled
