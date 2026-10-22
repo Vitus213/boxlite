@@ -6,7 +6,6 @@
 //! offset, and sharing across vCPU threads.
 
 use std::{
-    error::Error as _,
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -286,13 +285,7 @@ fn a_constructor_cannot_raise_a_line_before_the_build() {
         .add("eager", |r| {
             let line = r.line(4);
             let error = line.pulse().unwrap_err();
-            assert_eq!(
-                error
-                    .source()
-                    .and_then(|cause| cause.source())
-                    .map(ToString::to_string),
-                Some("the chipset is not built yet".to_owned())
-            );
+            assert!(matches!(error, Error::LineNotArmed(4)), "{error:?}");
             Ok(recorder(0, Some(line)).0)
         })
         .unwrap();
@@ -307,6 +300,40 @@ fn a_constructor_cannot_raise_a_line_before_the_build() {
         vm.calls(),
         [],
         "no host call before or after the failed build"
+    );
+}
+
+/// A rejected claim does not take the line, so every later claimant is
+/// told about the first holder.
+#[test]
+fn every_line_conflict_names_the_first_holder() {
+    let vm = Arc::new(MockVm::new());
+    let (mut builder, _events) = builder(&vm);
+    for name in ["com1", "second", "third"] {
+        builder
+            .add(name, |r| Ok(recorder(0, Some(r.line(4))).0))
+            .unwrap();
+    }
+
+    let error = builder.build().err().expect("GSI 4 is claimed thrice");
+
+    let Error::Chipset(conflicts) = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        conflicts,
+        &[
+            Conflict::Line {
+                line: 4,
+                device: "second",
+                owner: "com1",
+            },
+            Conflict::Line {
+                line: 4,
+                device: "third",
+                owner: "com1",
+            },
+        ]
     );
 }
 
@@ -460,6 +487,7 @@ fn one_chipset_serves_every_vcpu_thread_and_devices_keep_their_lines() {
         })
         .count();
     assert_eq!(edges, 1000, "every notify pulsed virtio1's line");
+    assert_eq!(chipset.buses().mmio.unclaimed(), (0, 0));
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

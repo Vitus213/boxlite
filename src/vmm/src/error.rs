@@ -33,6 +33,9 @@ pub(crate) enum Error {
     InvalidCommandLine(&'static str),
     /// Devices claimed resources the chipset cannot give them.
     Chipset(Vec<crate::chipset::Conflict>),
+    /// A device constructor raised interrupt `line` before the chipset was
+    /// built.
+    LineNotArmed(u32),
     /// Opening or loading the kernel image failed.
     #[cfg_attr(
         all(test, not(all(target_os = "linux", target_arch = "x86_64"))),
@@ -75,6 +78,12 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             }
+            Self::LineNotArmed(line) => {
+                write!(
+                    f,
+                    "interrupt line {line} raised before the chipset is built"
+                )
+            }
             Self::LoadKernel { path, .. } => {
                 write!(f, "failed to load the kernel {}", path.display())
             }
@@ -94,7 +103,8 @@ impl error::Error for Error {
             Self::InvalidVcpuCount(_)
             | Self::InvalidMemorySize(_)
             | Self::InvalidCommandLine(_)
-            | Self::Chipset(_) => None,
+            | Self::Chipset(_)
+            | Self::LineNotArmed(_) => None,
             Self::AllocateMemory { source, .. }
             | Self::LoadKernel { source, .. }
             | Self::LoadInitramfs { source, .. }

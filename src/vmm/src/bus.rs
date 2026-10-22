@@ -57,7 +57,7 @@ impl BusRange {
 }
 
 /// A device behind a range, and the register offset it sees at the range base.
-type Target = (Arc<Mutex<dyn BusDevice>>, u64);
+pub(crate) type Target = (Arc<Mutex<dyn BusDevice>>, u64);
 
 /// One registered range: a device window, or a window the host serves in the
 /// kernel, which no device may claim and which never reaches the bus.
@@ -76,14 +76,14 @@ pub(crate) struct Bus {
 }
 
 impl Bus {
-    /// Registers `range` for `owner`. With a `target`, the device sees its
+    /// Registers `range` for `claimant`. With a `target`, the device sees its
     /// register offset at the range base; `None` reserves the range for a
     /// window the host serves in the kernel. Fails with the owner of the
     /// registered range the new one overlaps.
     pub(crate) fn insert(
         &mut self,
         range: BusRange,
-        owner: &'static str,
+        claimant: &'static str,
         target: Option<Target>,
     ) -> Result<(), &'static str> {
         // Registered ranges never overlap, so only the one starting closest
@@ -97,7 +97,7 @@ impl Bus {
             range.base,
             Entry {
                 range,
-                owner,
+                owner: claimant,
                 target,
             },
         );

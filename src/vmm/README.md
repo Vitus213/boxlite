@@ -259,14 +259,17 @@ These are the pieces devices are built from; no device uses them yet.
   port `0x87` once at boot and takes `0xFF` as no ISA DMA controller. Reads
   reach a device zero-filled. A device whose lock an earlier panic poisoned
   stops the next access too.
-- **Lines.** `irq::IrqLine` drives one line through `IrqChip`, which every
-  host VM implements with `Vm::set_irq_line`. It is not `Clone`. `pulse`
-  raises an edge; `set_level` holds a level, makes no host call for a repeated
-  level and keeps the old level when the host call fails, so the next call
-  retries. Dropping a line held high lowers it.
+- **Lines.** `irq::IrqLine` drives one line through `IrqChip::set_line`,
+  which every host VM implements with `Vm::set_irq_line`; the distinct name
+  keeps the two traits from colliding where both are in scope. It is not
+  `Clone`. `pulse` raises an edge; `set_level` holds a level, makes no host
+  call for a repeated level and keeps the old level when the host call fails,
+  so the next call retries. Dropping a line held high lowers it and logs a
+  failure to do so.
 - **Events.** A device ends the VM by sending `Event::GuestReset` or
   `Event::DeviceFailed` through an `EventSender`, which never blocks or
-  panics and wakes the `EventLoop`'s `mio` poller. `EventLoop::wait` returns
+  panics and wakes the `EventLoop`'s `mio` poller. An event sent after the
+  loop is gone is logged at debug level and discarded. `EventLoop::wait` returns
   the oldest event, or `None` at its timeout, and rechecks the queue every
   second in case a wake-up was lost. Every event ends the VM; the VMM never
   restarts a guest.
@@ -285,14 +288,16 @@ or returns an immutable `Chipset` that owns the devices:
 ```
 
 - **Claims.** A claim never fails: `Resources` records it, so the closure
-  always finishes and every later claim is still checked. `pio_at` gives a
+  always finishes and every later claim is still checked. A rejected claim
+  leaves the range or line with its first holder, so every later conflict
+  names that holder. `pio_at` gives a
   range the register offset it starts at, for a controller whose ports are
   not contiguous.
 - **Constructors.** A constructor only claims resources and builds state; a
   device that needs a thread starts it after `build`. A line from
   `Resources::line` stays inert until `build` succeeds: using it earlier fails
-  without a host call, so a device that a conflict discards never raised
-  anything. On a conflict, every device drops without having run.
+  with `Error::LineNotArmed` and makes no host call, so a device that a
+  conflict discards never raised anything. On a conflict, every device drops without having run.
 - **Dispatch.** `Chipset::dispatch` hands a vCPU exit to the buses and
   returns every exit that is not MMIO or port I/O. The chipset never changes
   after the build, so every vCPU thread shares it without a lock of its own.

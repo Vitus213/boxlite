@@ -12,8 +12,8 @@
 //! changes after the build: no milestone adds a bus device at run time.
 
 use std::{
-    collections::BTreeMap,
-    fmt, io,
+    collections::{BTreeMap, btree_map::Entry},
+    fmt,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -23,7 +23,7 @@ use std::{
 use boxlite_hypervisor::VcpuExit;
 
 use crate::{
-    bus::{BusDevice, BusRange, Buses},
+    bus::{BusDevice, BusRange, Buses, Target},
     error::{Error, Result},
     events::EventSender,
     irq::{IrqChip, IrqLine},
@@ -108,20 +108,17 @@ impl fmt::Display for Conflict {
 /// The host interrupt controller as the builder's lines see it: inert until
 /// `build` succeeds, so a device constructor cannot raise a line for a
 /// device that a later conflict discards.
-struct Armed {
-    chip: Arc<dyn IrqChip>,
+struct GatedIrqChip {
+    inner: Arc<dyn IrqChip>,
     armed: AtomicBool,
 }
 
-impl IrqChip for Armed {
-    fn set_irq_line(&self, line: u32, level: bool) -> boxlite_hypervisor::Result<()> {
+impl IrqChip for GatedIrqChip {
+    fn set_line(&self, line: u32, level: bool) -> Result<()> {
         if !self.armed.load(Ordering::Acquire) {
-            return Err(boxlite_hypervisor::Error::SetIrqLine {
-                line,
-                source: io::Error::other("the chipset is not built yet"),
-            });
+            return Err(Error::LineNotArmed(line));
         }
-        self.chip.set_irq_line(line, level)
+        self.inner.set_line(line, level)
     }
 }
 
@@ -137,7 +134,7 @@ struct Claim {
 /// The resources a device constructor claims. Claims are recorded, not
 /// checked, so the builder can report every conflict at once.
 pub(crate) struct Resources {
-    chip: Arc<Armed>,
+    chip: Arc<GatedIrqChip>,
     events: EventSender,
     claims: Vec<Claim>,
     lines: Vec<u32>,
@@ -190,7 +187,7 @@ impl Resources {
 
 /// Collects devices and their resources, then builds the [`Chipset`].
 pub(crate) struct ChipsetBuilder {
-    chip: Arc<Armed>,
+    chip: Arc<GatedIrqChip>,
     events: EventSender,
     buses: Buses,
     lines: BTreeMap<u32, &'static str>,
@@ -203,8 +200,8 @@ impl ChipsetBuilder {
     /// through `events`.
     pub(crate) fn new(chip: Arc<dyn IrqChip>, events: EventSender) -> Self {
         Self {
-            chip: Arc::new(Armed {
-                chip,
+            chip: Arc::new(GatedIrqChip {
+                inner: chip,
                 armed: AtomicBool::new(false),
             }),
             events,
@@ -230,11 +227,11 @@ impl ChipsetBuilder {
         );
     }
 
-    /// Adds the device `build` constructs, under `name`, with the resources
+    /// Adds the device `ctor` constructs, under `name`, with the resources
     /// it claims. The constructor only claims resources and builds state: a
     /// device that needs a thread starts it after [`build`](Self::build).
     /// Fails only when the constructor does; conflicts wait for `build`.
-    pub(crate) fn add<D, F>(&mut self, name: &'static str, build: F) -> Result<()>
+    pub(crate) fn add<D, F>(&mut self, name: &'static str, ctor: F) -> Result<()>
     where
         D: BusDevice + 'static,
         F: FnOnce(&mut Resources) -> Result<D>,
@@ -245,18 +242,22 @@ impl ChipsetBuilder {
             claims: Vec::new(),
             lines: Vec::new(),
         };
-        let device: Arc<Mutex<dyn BusDevice>> = Arc::new(Mutex::new(build(&mut resources)?));
+        let device: Arc<Mutex<dyn BusDevice>> = Arc::new(Mutex::new(ctor(&mut resources)?));
         for claim in resources.claims {
             let offset = claim.offset;
             self.register(claim, name, Some((Arc::clone(&device), offset)));
         }
         for line in resources.lines {
-            if let Some(owner) = self.lines.insert(line, name) {
-                self.conflicts.push(Conflict::Line {
+            // A rejected claim leaves the line with its first holder.
+            match self.lines.entry(line) {
+                Entry::Vacant(slot) => {
+                    slot.insert(name);
+                }
+                Entry::Occupied(holder) => self.conflicts.push(Conflict::Line {
                     line,
                     device: name,
-                    owner,
-                });
+                    owner: holder.get(),
+                }),
             }
         }
         self.devices.push(device);
@@ -276,16 +277,11 @@ impl ChipsetBuilder {
         })
     }
 
-    fn register(
-        &mut self,
-        claim: Claim,
-        owner: &'static str,
-        target: Option<(Arc<Mutex<dyn BusDevice>>, u64)>,
-    ) {
+    fn register(&mut self, claim: Claim, claimant: &'static str, target: Option<Target>) {
         let Some(range) = BusRange::new(claim.base, claim.len) else {
             self.conflicts.push(Conflict::InvalidRange {
                 bus: claim.bus,
-                device: owner,
+                device: claimant,
                 base: claim.base,
                 len: claim.len,
             });
@@ -296,13 +292,13 @@ impl ChipsetBuilder {
             #[cfg(target_arch = "x86_64")]
             BusKind::Pio => &mut self.buses.pio,
         };
-        if let Err(holder) = bus.insert(range, owner, target) {
+        if let Err(owner) = bus.insert(range, claimant, target) {
             self.conflicts.push(Conflict::Range {
                 bus: claim.bus,
-                device: owner,
+                device: claimant,
                 base: claim.base,
                 len: claim.len,
-                owner: holder,
+                owner,
             });
         }
     }
