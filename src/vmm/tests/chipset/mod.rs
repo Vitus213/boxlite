@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The chipset builder: claims, every conflict in one report, lines that
-//! stay inert until the build, dispatch to the device at its register
-//! offset, and sharing across vCPU threads.
+//! are not armed until the build, dispatch to the device at its offset, and
+//! sharing across vCPU threads.
 
 use std::{
     sync::{Arc, Mutex},
@@ -24,9 +24,16 @@ use crate::{
     mock_vm::{Call, MockVm},
 };
 
-/// The accesses a recorder saw: whether each was a write, its offset and
-/// its bytes.
-type Accesses = Arc<Mutex<Vec<(bool, u64, Vec<u8>)>>>;
+/// One access a recorder saw, at its register offset, with the bytes it
+/// arrived with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Access {
+    Read { offset: u64, bytes: Vec<u8> },
+    Write { offset: u64, bytes: Vec<u8> },
+}
+
+/// Every access a recorder saw, shared with the test.
+type Accesses = Arc<Mutex<Vec<Access>>>;
 
 /// Records every access and answers reads with `reply`.
 struct Recorder {
@@ -37,18 +44,18 @@ struct Recorder {
 
 impl BusDevice for Recorder {
     fn read(&mut self, offset: u64, data: &mut [u8]) {
-        self.accesses
-            .lock()
-            .unwrap()
-            .push((false, offset, data.to_vec()));
+        self.accesses.lock().unwrap().push(Access::Read {
+            offset,
+            bytes: data.to_vec(),
+        });
         data.fill(self.reply);
     }
 
     fn write(&mut self, offset: u64, data: &[u8]) {
-        self.accesses
-            .lock()
-            .unwrap()
-            .push((true, offset, data.to_vec()));
+        self.accesses.lock().unwrap().push(Access::Write {
+            offset,
+            bytes: data.to_vec(),
+        });
         if let Some(line) = &self.line {
             line.pulse().unwrap();
         }
@@ -103,42 +110,42 @@ fn build_reports_every_conflict_at_once_naming_both_sides() {
         .unwrap();
 
     let error = builder.build().err().expect("conflicts fail the build");
-    let Error::Chipset(conflicts) = &error else {
+    let Error::ChipsetConflicts(conflicts) = &error else {
         panic!("{error:?}");
     };
     assert_eq!(
         conflicts,
         &[
-            Conflict::Range {
+            Conflict::RangeTaken {
                 bus: BusKind::Pio,
-                device: "intruder",
+                claimant: "intruder",
                 base: 0x3fe,
                 len: 4,
                 owner: "com1",
             },
-            Conflict::Range {
+            Conflict::RangeTaken {
                 bus: BusKind::Pio,
-                device: "intruder",
+                claimant: "intruder",
                 base: 0x42,
                 len: 1,
                 owner: "in-kernel PIT",
             },
-            Conflict::Range {
+            Conflict::RangeTaken {
                 bus: BusKind::Mmio,
-                device: "intruder",
+                claimant: "intruder",
                 base: 0xfee0_0800,
                 len: 0x10,
                 owner: "in-kernel local APIC",
             },
             Conflict::InvalidRange {
                 bus: BusKind::Mmio,
-                device: "intruder",
+                claimant: "intruder",
                 base: 0x1000,
                 len: 0,
             },
-            Conflict::Line {
+            Conflict::LineTaken {
                 line: 4,
-                device: "intruder",
+                claimant: "intruder",
                 owner: "com1",
             },
         ]
@@ -170,18 +177,18 @@ fn a_built_chipset_dispatches_to_each_device_at_its_register_offset() {
     builder
         .add("i8042", |r| {
             r.pio(0x60, 1);
-            r.pio_at(0x64, 1, 4);
+            r.pio_with_offset(0x64, 1, 4);
             Ok(controller)
         })
         .unwrap();
     let chipset = builder.build().unwrap();
 
-    let mut lsr = [0];
+    let mut line_status = [0];
     assert!(
         chipset
             .dispatch(VcpuExit::IoIn {
                 port: 0x3fd,
-                bytes: &mut lsr,
+                bytes: &mut line_status,
             })
             .is_none()
     );
@@ -193,12 +200,12 @@ fn a_built_chipset_dispatches_to_each_device_at_its_register_offset() {
             })
             .is_none()
     );
-    let mut between = [0];
+    let mut between_i8042_ports = [0];
     assert!(
         chipset
             .dispatch(VcpuExit::IoIn {
                 port: 0x61,
-                bytes: &mut between,
+                bytes: &mut between_i8042_ports,
             })
             .is_none()
     );
@@ -207,12 +214,21 @@ fn a_built_chipset_dispatches_to_each_device_at_its_register_offset() {
         Some(VcpuExit::Halted)
     ));
 
-    assert_eq!(lsr, [0x60]);
-    assert_eq!(between, [UNCLAIMED_READ]);
-    assert_eq!(*serial_accesses.lock().unwrap(), [(false, 5, vec![0])]);
+    assert_eq!(line_status, [0x60]);
+    assert_eq!(between_i8042_ports, [UNCLAIMED_READ]);
+    assert_eq!(
+        *serial_accesses.lock().unwrap(),
+        [Access::Read {
+            offset: 5,
+            bytes: vec![0]
+        }]
+    );
     assert_eq!(
         *controller_accesses.lock().unwrap(),
-        [(true, 4, vec![0xfe])]
+        [Access::Write {
+            offset: 4,
+            bytes: vec![0xfe]
+        }]
     );
     assert_eq!(chipset.buses().pio.unclaimed(), (1, 0));
 }
@@ -243,29 +259,29 @@ fn mmio_claims_and_lines_conflict_on_every_architecture() {
         .unwrap();
 
     let error = builder.build().err().expect("conflicts fail the build");
-    let Error::Chipset(conflicts) = &error else {
+    let Error::ChipsetConflicts(conflicts) = &error else {
         panic!("{error:?}");
     };
     assert_eq!(
         conflicts,
         &[
-            Conflict::Range {
+            Conflict::RangeTaken {
                 bus: BusKind::Mmio,
-                device: "rtc",
+                claimant: "rtc",
                 base: 0x4000_2800,
                 len: 0x1000,
                 owner: "uart",
             },
-            Conflict::Range {
+            Conflict::RangeTaken {
                 bus: BusKind::Mmio,
-                device: "rtc",
+                claimant: "rtc",
                 base: 0x3fff_8000,
                 len: 0x100,
                 owner: "in-kernel GIC distributor",
             },
-            Conflict::Line {
+            Conflict::LineTaken {
                 line: 32,
-                device: "rtc",
+                claimant: "rtc",
                 owner: "uart",
             },
         ]
@@ -293,7 +309,7 @@ fn a_constructor_cannot_raise_a_line_before_the_build() {
     let error = builder.build().err().expect("GSI 4 is claimed twice");
 
     assert!(
-        matches!(&error, Error::Chipset(conflicts) if conflicts.len() == 1),
+        matches!(&error, Error::ChipsetConflicts(conflicts) if conflicts.len() == 1),
         "{error:?}"
     );
     assert_eq!(
@@ -304,9 +320,9 @@ fn a_constructor_cannot_raise_a_line_before_the_build() {
 }
 
 /// A rejected claim does not take the line, so every later claimant is
-/// told about the first holder.
+/// told about the first owner.
 #[test]
-fn every_line_conflict_names_the_first_holder() {
+fn every_line_conflict_names_the_first_owner() {
     let vm = Arc::new(MockVm::new());
     let (mut builder, _events) = builder(&vm);
     for name in ["com1", "second", "third"] {
@@ -317,20 +333,20 @@ fn every_line_conflict_names_the_first_holder() {
 
     let error = builder.build().err().expect("GSI 4 is claimed thrice");
 
-    let Error::Chipset(conflicts) = &error else {
+    let Error::ChipsetConflicts(conflicts) = &error else {
         panic!("{error:?}");
     };
     assert_eq!(
         conflicts,
         &[
-            Conflict::Line {
+            Conflict::LineTaken {
                 line: 4,
-                device: "second",
+                claimant: "second",
                 owner: "com1",
             },
-            Conflict::Line {
+            Conflict::LineTaken {
                 line: 4,
-                device: "third",
+                claimant: "third",
                 owner: "com1",
             },
         ]
@@ -387,7 +403,7 @@ fn a_device_ends_the_vm_through_the_builders_event_loop() {
     builder
         .add("reset", |r| {
             r.mmio(0x1000, 1);
-            Ok(Resetter(r.events()))
+            Ok(Resetter(r.event_sender()))
         })
         .unwrap();
     let chipset = builder.build().unwrap();

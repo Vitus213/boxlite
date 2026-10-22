@@ -277,11 +277,12 @@ These are the pieces devices are built from; no device uses them yet.
 ## Chipset
 
 `chipset::ChipsetBuilder` is the one registry of port ranges, MMIO ranges and
-interrupt lines, as OpenVMM's chipset builder is. Platform code reserves the
+interrupt lines, like OpenVMM's chipset builder. Platform code reserves the
 windows the host serves in the kernel, then adds each device by name with a
 closure that claims the device's resources from a `Resources` handle and
-returns the device. `build` reports every conflict at once, naming both sides,
-or returns an immutable `Chipset` that owns the devices:
+returns the device. `build` reports every conflict at once, naming the
+claimant and the owner, or returns an immutable `Chipset` that owns the
+devices:
 
 ```text
 5 chipset conflict(s): intruder claims port range 0x3fe+0x4, held by com1; intruder claims port range 0x42+0x1, held by in-kernel PIT; intruder claims MMIO range 0xfee00800+0x10, held by in-kernel local APIC; intruder claims MMIO range 0x1000+0x0, which is empty or wraps; intruder claims interrupt line 4, held by com1;
@@ -289,15 +290,15 @@ or returns an immutable `Chipset` that owns the devices:
 
 - **Claims.** A claim never fails: `Resources` records it, so the closure
   always finishes and every later claim is still checked. A rejected claim
-  leaves the range or line with its first holder, so every later conflict
-  names that holder. `pio_at` gives a
-  range the register offset it starts at, for a controller whose ports are
-  not contiguous.
+  leaves the range or line with its first owner, so every later conflict
+  names that owner. `pio_with_offset` sets the device offset a range's first
+  port reaches, for a controller whose ports are split across several ranges.
 - **Constructors.** A constructor only claims resources and builds state; a
   device that needs a thread starts it after `build`. A line from
-  `Resources::line` stays inert until `build` succeeds: using it earlier fails
-  with `Error::LineNotArmed` and makes no host call, so a device that a
-  conflict discards never raised anything. On a conflict, every device drops without having run.
+  `Resources::line` is not armed until `build` succeeds: using it earlier
+  fails with `Error::LineNotArmed` and makes no host call, so a device that a
+  conflict discards never raised anything. On a conflict, every device drops
+  without having run.
 - **Dispatch.** `Chipset::dispatch` hands a vCPU exit to the buses and
   returns every exit that is not MMIO or port I/O. The chipset never changes
   after the build, so every vCPU thread shares it without a lock of its own.

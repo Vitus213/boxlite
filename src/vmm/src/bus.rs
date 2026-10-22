@@ -76,14 +76,14 @@ pub(crate) struct Bus {
 }
 
 impl Bus {
-    /// Registers `range` for `claimant`. With a `target`, the device sees its
+    /// Registers `range` for `owner`. With a `target`, the device sees its
     /// register offset at the range base; `None` reserves the range for a
     /// window the host serves in the kernel. Fails with the owner of the
     /// registered range the new one overlaps.
     pub(crate) fn insert(
         &mut self,
         range: BusRange,
-        claimant: &'static str,
+        owner: &'static str,
         target: Option<Target>,
     ) -> Result<(), &'static str> {
         // Registered ranges never overlap, so only the one starting closest
@@ -97,7 +97,7 @@ impl Bus {
             range.base,
             Entry {
                 range,
-                owner: claimant,
+                owner,
                 target,
             },
         );

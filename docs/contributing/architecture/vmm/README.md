@@ -316,8 +316,8 @@ today.
   one registry of port ranges, MMIO ranges and interrupt lines, as in
   OpenVMM's chipset builder. Platform code reserves the windows the host
   serves in the kernel and adds each device by name with the ranges and lines
-  it claims. `build` reports every conflict at once, naming both sides, or
-  returns an immutable `Chipset` that owns the devices. Devices register while
+  it claims. `build` reports every conflict at once, naming the claimant and
+  the owner, or returns an immutable `Chipset` that owns the devices. Devices register while
   the VM is built; M6 and M7 change the guest without adding bus devices.
 - **Dispatch.** `Buses::dispatch` serves MMIO and port exits and returns every
   other exit to the vCPU loop. An access must lie entirely inside one range,

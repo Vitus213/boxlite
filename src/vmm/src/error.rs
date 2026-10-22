@@ -32,7 +32,7 @@ pub(crate) enum Error {
     /// The kernel command line is too long or not printable ASCII.
     InvalidCommandLine(&'static str),
     /// Devices claimed resources the chipset cannot give them.
-    Chipset(Vec<crate::chipset::Conflict>),
+    ChipsetConflicts(Vec<crate::chipset::Conflict>),
     /// A device constructor raised interrupt `line` before the chipset was
     /// built.
     LineNotArmed(u32),
@@ -71,7 +71,7 @@ impl fmt::Display for Error {
             Self::InvalidCommandLine(reason) => {
                 write!(f, "invalid kernel command line: {reason}")
             }
-            Self::Chipset(conflicts) => {
+            Self::ChipsetConflicts(conflicts) => {
                 write!(f, "{} chipset conflict(s):", conflicts.len())?;
                 for conflict in conflicts {
                     write!(f, " {conflict};")?;
@@ -103,7 +103,7 @@ impl error::Error for Error {
             Self::InvalidVcpuCount(_)
             | Self::InvalidMemorySize(_)
             | Self::InvalidCommandLine(_)
-            | Self::Chipset(_)
+            | Self::ChipsetConflicts(_)
             | Self::LineNotArmed(_) => None,
             Self::AllocateMemory { source, .. }
             | Self::LoadKernel { source, .. }
