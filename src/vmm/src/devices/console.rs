@@ -13,69 +13,73 @@ use std::{
     collections::VecDeque,
     io::{self, Write},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicUsize, Ordering},
-        mpsc,
+        mpsc::{self, RecvTimeoutError},
     },
     thread,
     time::Duration,
 };
 
-/// Bytes the queue holds before it drops the oldest.
-pub(crate) const DEFAULT_CAPACITY: usize = 64 * 1024;
+/// Bytes of guest serial output the queue holds before it drops the oldest.
+pub(crate) const DEFAULT_QUEUE_BYTES: usize = 64 * 1024;
 
 /// How long `finish` waits: enough for a healthy sink to take a full queue.
 const FINISH_TIMEOUT: Duration = Duration::from_secs(1);
 
-struct Queue {
-    bytes: VecDeque<u8>,
-    /// Bytes the worker took and is writing.
-    in_flight: usize,
+/// Guest serial output on its way to the host sink, one byte per entry.
+struct OutputQueue {
+    /// Bytes the worker has not taken yet, oldest first.
+    pending: VecDeque<u8>,
+    /// How many bytes the worker took and is still writing to the sink.
+    writing_len: usize,
+    /// Set once the console finishes: later writes are dropped.
     closed: bool,
 }
 
-struct Shared {
-    queue: Mutex<Queue>,
-    /// Signals the worker that bytes arrived or the queue closed.
-    ready: Condvar,
+/// The state the serial port's writer and the worker thread share.
+struct ConsoleState {
+    queue: Mutex<OutputQueue>,
+    /// Wakes the worker when bytes arrive or the queue closes.
+    wake_worker: Condvar,
+    /// Most bytes `pending` holds.
     capacity: usize,
+    /// Bytes dropped so far, read through `ConsoleWorker::dropped_bytes`.
     dropped: AtomicUsize,
 }
 
-impl Shared {
+impl ConsoleState {
     /// Locks the queue, which a panic under the lock leaves consistent.
-    fn queue(&self) -> MutexGuard<'_, Queue> {
-        self.queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn lock_queue(&self) -> MutexGuard<'_, OutputQueue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Closes the queue: the worker writes what is left and ends.
     fn close(&self) {
-        self.queue().closed = true;
-        self.ready.notify_one();
+        self.lock_queue().closed = true;
+        self.wake_worker.notify_one();
     }
 }
 
 /// The serial port's sink: a write queues the bytes and returns.
-pub(crate) struct ConsoleWriter(Arc<Shared>);
+pub(crate) struct ConsoleWriter(Arc<ConsoleState>);
 
 impl Write for ConsoleWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut queue = self.0.queue();
+        let mut queue = self.0.lock_queue();
         if queue.closed {
             self.0.dropped.fetch_add(buf.len(), Ordering::Relaxed);
             return Ok(buf.len());
         }
         for &byte in buf {
-            if queue.bytes.len() == self.0.capacity {
-                queue.bytes.pop_front();
+            if queue.pending.len() == self.0.capacity {
+                queue.pending.pop_front();
                 self.0.dropped.fetch_add(1, Ordering::Relaxed);
             }
-            queue.bytes.push_back(byte);
+            queue.pending.push_back(byte);
         }
         drop(queue);
-        self.0.ready.notify_one();
+        self.0.wake_worker.notify_one();
         Ok(buf.len())
     }
 
@@ -84,12 +88,12 @@ impl Write for ConsoleWriter {
     }
 }
 
-/// The worker thread that drains the queue into the sink.
+/// The worker thread that writes the queue to the sink.
 pub(crate) struct ConsoleWorker {
-    shared: Arc<Shared>,
+    state: Arc<ConsoleState>,
     thread: Option<thread::JoinHandle<()>>,
-    /// Disconnects when the worker ends, panics included.
-    ended: mpsc::Receiver<()>,
+    /// Disconnects when the worker thread exits, panics included.
+    exited: mpsc::Receiver<()>,
 }
 
 impl ConsoleWorker {
@@ -102,87 +106,84 @@ impl ConsoleWorker {
         if capacity == 0 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let shared = Arc::new(Shared {
-            queue: Mutex::new(Queue {
-                bytes: VecDeque::with_capacity(capacity),
-                in_flight: 0,
+        let state = Arc::new(ConsoleState {
+            queue: Mutex::new(OutputQueue {
+                pending: VecDeque::with_capacity(capacity),
+                writing_len: 0,
                 closed: false,
             }),
-            ready: Condvar::new(),
+            wake_worker: Condvar::new(),
             capacity,
             dropped: AtomicUsize::new(0),
         });
-        let (ended_sender, ended) = mpsc::channel::<()>();
+        let (exit_sender, exited) = mpsc::channel::<()>();
         let thread = thread::Builder::new().name("console".into()).spawn({
-            let shared = Arc::clone(&shared);
+            let state = Arc::clone(&state);
             move || {
-                let _ended = ended_sender;
-                drain(&shared, sink);
+                let _exit_sender = exit_sender;
+                run_worker(&state, sink);
             }
         })?;
         Ok((
-            ConsoleWriter(Arc::clone(&shared)),
+            ConsoleWriter(Arc::clone(&state)),
             Self {
-                shared,
+                state,
                 thread: Some(thread),
-                ended,
+                exited,
             },
         ))
     }
 
     /// Bytes dropped: the queue was full or closed, or the sink never took them.
     pub(crate) fn dropped_bytes(&self) -> u64 {
-        self.shared.dropped.load(Ordering::Relaxed) as u64
+        self.state.dropped.load(Ordering::Relaxed) as u64
     }
 
     /// Closes the queue and waits up to [`FINISH_TIMEOUT`] for the worker to
     /// write the rest. A sink write cannot be cancelled, so then the worker
-    /// is left behind and every unwritten byte, its held batch included,
-    /// counts as dropped. A second call does nothing.
+    /// is left behind and every unwritten byte, its batch included, counts
+    /// as dropped. A second call does nothing.
     pub(crate) fn finish(&mut self) {
         let Some(thread) = self.thread.take() else {
             return;
         };
-        self.shared.close();
-        if let Err(mpsc::RecvTimeoutError::Disconnected) = self.ended.recv_timeout(FINISH_TIMEOUT) {
+        self.state.close();
+        if let Err(RecvTimeoutError::Disconnected) = self.exited.recv_timeout(FINISH_TIMEOUT) {
             let _ = thread.join();
             return;
         }
-        let mut queue = self.shared.queue();
-        let unwritten = queue.bytes.drain(..).count() + std::mem::take(&mut queue.in_flight);
-        self.shared.dropped.fetch_add(unwritten, Ordering::Relaxed);
+        let mut queue = self.state.lock_queue();
+        let unwritten = queue.pending.drain(..).count() + std::mem::take(&mut queue.writing_len);
+        self.state.dropped.fetch_add(unwritten, Ordering::Relaxed);
     }
 }
 
 impl Drop for ConsoleWorker {
     fn drop(&mut self) {
-        self.shared.close(); // Without `finish`, nothing waits for the worker.
+        self.state.close(); // Without `finish`, nothing waits for the worker.
     }
 }
 
-/// The worker loop: takes everything queued, writes it, and ends once the
-/// queue is closed and empty.
-fn drain(shared: &Shared, mut sink: Box<dyn Write + Send>) {
+/// The worker loop: takes every pending byte as one batch, writes it outside
+/// the lock, and ends once the queue is closed and empty.
+fn run_worker(state: &ConsoleState, mut sink: Box<dyn Write + Send>) {
     loop {
-        let mut queue = shared.queue();
-        while queue.bytes.is_empty() && !queue.closed {
-            queue = shared
-                .ready
-                .wait(queue)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-        if queue.bytes.is_empty() {
+        let mut queue = state
+            .wake_worker
+            .wait_while(state.lock_queue(), |q| q.pending.is_empty() && !q.closed)
+            .unwrap_or_else(PoisonError::into_inner);
+        if queue.pending.is_empty() {
             return;
         }
-        let pending: Vec<u8> = queue.bytes.drain(..).collect();
-        queue.in_flight = pending.len();
+        let batch: Vec<u8> = queue.pending.drain(..).collect();
+        queue.writing_len = batch.len();
         drop(queue);
-        let written = sink.write_all(&pending).and_then(|()| sink.flush());
-        let mut queue = shared.queue();
-        // A `finish` that gave up has already counted the batch.
-        let lost = std::mem::take(&mut queue.in_flight);
-        if written.is_err() {
-            shared.dropped.fetch_add(lost, Ordering::Relaxed);
+        let write_result = sink.write_all(&batch).and_then(|()| sink.flush());
+        let mut queue = state.lock_queue();
+        // A `finish` that gave up has already counted the batch and reset this to 0.
+        let lost = std::mem::take(&mut queue.writing_len);
+        if write_result.is_err() {
+            state.dropped.fetch_add(lost, Ordering::Relaxed);
         }
     }
 }

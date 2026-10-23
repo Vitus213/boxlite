@@ -17,14 +17,14 @@ use crate::{
 /// first reset ends the VM, and Linux writes up to ten.
 struct ResetTrigger {
     event_sender: EventSender,
-    sent: Cell<bool>,
+    reset_sent: Cell<bool>,
 }
 
 impl Trigger for ResetTrigger {
     type E = Infallible;
 
     fn trigger(&self) -> Result<(), Infallible> {
-        if !self.sent.replace(true) {
+        if !self.reset_sent.replace(true) {
             self.event_sender.send(Event::GuestReset);
         }
         Ok(())
@@ -42,7 +42,7 @@ impl I8042 {
         Self {
             controller: I8042Device::new(ResetTrigger {
                 event_sender,
-                sent: Cell::new(false),
+                reset_sent: Cell::new(false),
             }),
         }
     }

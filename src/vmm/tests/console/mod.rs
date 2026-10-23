@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{ConsoleWorker, DEFAULT_CAPACITY};
+use super::{ConsoleWorker, DEFAULT_QUEUE_BYTES};
 
 /// Bytes the sink took, shared with the test.
 #[derive(Clone, Default)]
@@ -144,7 +144,7 @@ fn finish_gives_up_on_a_stuck_sink_and_counts_what_it_never_took() {
 fn finish_writes_what_is_queued_before_the_worker_ends() {
     let taken = Taken::default();
     let (mut writer, mut worker) =
-        ConsoleWorker::spawn(Box::new(taken.clone()), DEFAULT_CAPACITY).unwrap();
+        ConsoleWorker::spawn(Box::new(taken.clone()), DEFAULT_QUEUE_BYTES).unwrap();
 
     for line in ["Linux version 6.12\n", "reboot: Restarting system\n"] {
         writer.write_all(line.as_bytes()).unwrap();
@@ -191,7 +191,7 @@ fn a_batch_finish_gave_up_on_counts_once_when_the_sink_then_fails() {
 
     stuck.0.open();
     assert_eq!(
-        worker.ended.recv_timeout(Duration::from_secs(5)),
+        worker.exited.recv_timeout(Duration::from_secs(5)),
         Err(mpsc::RecvTimeoutError::Disconnected),
         "the freed worker ends"
     );

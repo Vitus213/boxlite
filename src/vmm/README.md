@@ -35,7 +35,7 @@ boxlite-vmm
 | `chipset` | `ChipsetBuilder`, the one registry of ranges and interrupt lines, and `Chipset`, the read-only machine it builds |
 | `bus` | `Bus`, `BusRange` and `BusDevice`, and `Buses::dispatch`, which serves the MMIO and port exits of a vCPU |
 | `irq` | `IrqChip`, the host interrupt controller as devices see it, and `IrqLine`, one device line; HVF and KVM provide the controller, WHP (M10) only local APICs |
-| `devices` | The console queue, and on x86_64 the 8250 UART at COM1 and the i8042 reset, with `add_legacy`, which adds them to the chipset |
+| `devices` | The console queue, and on x86_64 the 8250 UART at COM1 and the i8042 reset, with `add_legacy_devices`, which adds them to the chipset |
 | `events` | `Event`, which ends the VM, `EventSender`, and `EventLoop`, the poller that waits for the first event |
 
 Backend implementation and guest boot follow in M1. Virtio devices, the BoxLite
@@ -325,7 +325,7 @@ devices:
 
 ## Legacy devices and the console
 
-On x86_64, `devices::x86_64::add_legacy` reserves the in-kernel PIC
+On x86_64, `devices::x86_64::add_legacy_devices` reserves the in-kernel PIC
 (`0x20`, `0xA0`, `0x4D0`), PIT (`0x40`–`0x43`, `0x61`), IOAPIC and local APIC
 windows, then adds the legacy devices:
 

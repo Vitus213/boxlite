@@ -11,11 +11,11 @@ use std::{
     time::Duration,
 };
 
-use super::{COM1, I8042_COMMAND, I8042_DATA, add_legacy};
+use super::{COM1, I8042_COMMAND, I8042_DATA, add_legacy_devices};
 use crate::{
     bus::UNCLAIMED_READ,
     chipset::{Chipset, ChipsetBuilder, Conflict},
-    devices::console::{ConsoleWorker, DEFAULT_CAPACITY},
+    devices::console::{ConsoleWorker, DEFAULT_QUEUE_BYTES},
     error::Error,
     events::{Event, EventLoop},
     mock_vm::{Call, MockVm},
@@ -67,9 +67,10 @@ impl Machine {
     fn new(vm: MockVm, output: Output) -> Self {
         let vm = Arc::new(vm);
         let events = EventLoop::new().unwrap();
-        let (writer, console) = ConsoleWorker::spawn(Box::new(output), DEFAULT_CAPACITY).unwrap();
+        let (writer, console) =
+            ConsoleWorker::spawn(Box::new(output), DEFAULT_QUEUE_BYTES).unwrap();
         let mut builder = ChipsetBuilder::new(vm.clone(), events.sender());
-        add_legacy(&mut builder, writer).unwrap();
+        add_legacy_devices(&mut builder, writer).unwrap();
         Self {
             chipset: builder.build().unwrap(),
             console,
@@ -180,8 +181,8 @@ fn a_second_platform_conflicts_with_every_legacy_claim() {
     let mut builder = ChipsetBuilder::new(vm, events.sender());
     let (writer, _console) = ConsoleWorker::spawn(Box::new(Output::default()), 16).unwrap();
     let (second, _second_console) = ConsoleWorker::spawn(Box::new(Output::default()), 16).unwrap();
-    add_legacy(&mut builder, writer).unwrap();
-    add_legacy(&mut builder, second).unwrap();
+    add_legacy_devices(&mut builder, writer).unwrap();
+    add_legacy_devices(&mut builder, second).unwrap();
 
     let error = builder.build().err().expect("the ports are taken");
     let Error::ChipsetConflicts(conflicts) = &error else {

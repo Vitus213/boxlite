@@ -30,8 +30,8 @@ use crate::{
     chipset::ChipsetBuilder,
     config::VmConfig,
     devices::{
-        console::{ConsoleWorker, DEFAULT_CAPACITY},
-        x86_64::{COM1, COM1_GSI, add_legacy},
+        console::{ConsoleWorker, DEFAULT_QUEUE_BYTES},
+        x86_64::{COM1, COM1_GSI, add_legacy_devices},
     },
     error::Error,
     events::{Event, EventLoop},
@@ -262,7 +262,7 @@ impl Console {
     fn to(log: &SerialLog) -> Self {
         Self {
             sink: Box::new(log.clone()),
-            capacity: DEFAULT_CAPACITY,
+            capacity: DEFAULT_QUEUE_BYTES,
         }
     }
 }
@@ -347,7 +347,7 @@ fn run_linux(
     let events = EventLoop::new().unwrap();
     let (writer, console) = ConsoleWorker::spawn(console.sink, console.capacity).unwrap();
     let mut builder = ChipsetBuilder::new(irq_chip.clone(), events.sender());
-    add_legacy(&mut builder, writer).unwrap();
+    add_legacy_devices(&mut builder, writer).unwrap();
     let chipset = builder.build().unwrap();
 
     let count = config.vcpu_count;

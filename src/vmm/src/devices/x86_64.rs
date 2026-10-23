@@ -10,7 +10,7 @@ use crate::{
     error::Result,
 };
 
-// COM1 and the GSI of its interrupt, then the i8042 data and command ports.
+// COM1, the interrupt line (GSI) it raises, then the i8042 data and command ports.
 pub(crate) const COM1: u64 = 0x3f8;
 pub(crate) const COM1_GSI: u32 = 4;
 pub(crate) const I8042_DATA: u64 = 0x60;
@@ -19,7 +19,10 @@ pub(crate) const I8042_COMMAND: u64 = 0x64;
 /// Reserves the windows the host serves in the kernel, so a device placed
 /// there fails the build, then adds COM1 on GSI 4, writing to `console`, and
 /// the i8042, whose reset ends the VM.
-pub(crate) fn add_legacy(builder: &mut ChipsetBuilder, console: ConsoleWriter) -> Result<()> {
+pub(crate) fn add_legacy_devices(
+    builder: &mut ChipsetBuilder,
+    console: ConsoleWriter,
+) -> Result<()> {
     for (base, len, owner) in [
         (0x20, 2, "in-kernel PIC"),
         (0xa0, 2, "in-kernel PIC"),
