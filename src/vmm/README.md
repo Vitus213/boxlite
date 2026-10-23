@@ -393,8 +393,7 @@ windows, then adds the legacy devices:
 On x86_64, `devices::cmos::CmosRtc` is the PC's real-time clock. The guest
 writes a register number to port `0x70`, then reads or writes that register
 at `0x71`. Linux reads the date and time from it once at boot to set its
-system clock. Register numbers and bits carry their names from Linux's
-`include/linux/mc146818rtc.h`.
+system clock.
 
 - The time is an injected `Clock` plus an offset that keeps any time the
   guest sets. `cmos::host_clock` reads the host wall clock; the tests inject

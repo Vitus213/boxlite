@@ -31,56 +31,62 @@ pub(crate) fn host_clock() -> i64 {
     }
 }
 
-// Register numbers and bits carry their names from Linux's
-// `include/linux/mc146818rtc.h`.
-const RTC_SECONDS: usize = 0x00;
-const RTC_MINUTES: usize = 0x02;
-const RTC_HOURS: usize = 0x04;
-const RTC_DAY_OF_WEEK: usize = 0x06;
-const RTC_DAY_OF_MONTH: usize = 0x07;
-const RTC_MONTH: usize = 0x08;
-const RTC_YEAR: usize = 0x09;
-const RTC_REG_A: usize = 0x0a;
-const RTC_REG_B: usize = 0x0b;
-const RTC_REG_C: usize = 0x0c;
-const RTC_REG_D: usize = 0x0d;
+// The registers the guest selects at port 0x70: the time, then the four
+// status registers.
+const SECONDS: usize = 0x00;
+const MINUTES: usize = 0x02;
+const HOURS: usize = 0x04;
+const DAY_OF_WEEK: usize = 0x06;
+const DAY_OF_MONTH: usize = 0x07;
+const MONTH: usize = 0x08;
+const YEAR: usize = 0x09;
+const STATUS_A: usize = 0x0a;
+const STATUS_B: usize = 0x0b;
+const STATUS_C: usize = 0x0c;
+const STATUS_D: usize = 0x0d;
 /// The century byte PC firmware uses; Linux reads it only through ACPI.
 const CENTURY: usize = 0x32;
 const TIME_REGISTERS: [usize; 8] = [
-    RTC_SECONDS,
-    RTC_MINUTES,
-    RTC_HOURS,
-    RTC_DAY_OF_WEEK,
-    RTC_DAY_OF_MONTH,
-    RTC_MONTH,
-    RTC_YEAR,
+    SECONDS,
+    MINUTES,
+    HOURS,
+    DAY_OF_WEEK,
+    DAY_OF_MONTH,
+    MONTH,
+    YEAR,
     CENTURY,
 ];
 
-/// Register A: update in progress, which this model never reports.
-const RTC_UIP: u8 = 0x80;
-/// Register A: the divider bits. Above the 32.768 kHz time base, they hold
-/// the divider in reset and the clock stops.
-const RTC_DIV_CTL: u8 = 0x70;
-const RTC_REF_CLCK_32KHZ: u8 = 0x20;
-/// Register A at power-on: the 32.768 kHz time base and a 1024 Hz periodic rate.
-const REG_A_DEFAULT: u8 = 0x26;
-/// Register B: SET stops the clock so the guest can write the time.
-const RTC_SET: u8 = 0x80;
-/// Register B: binary instead of BCD time registers.
-const RTC_DM_BINARY: u8 = 0x04;
-/// Register B: 24-hour mode, the only mode modelled.
-const RTC_24H: u8 = 0x02;
-/// Register D: the RAM and the time are valid.
-const RTC_VRT: u8 = 0x80;
+/// Status A: the time is updating, which this clock never reports.
+const UPDATE_IN_PROGRESS: u8 = 0x80;
+/// Status A: the divider bits. Any value above `DIVIDER_32KHZ` holds the
+/// divider in reset, which stops the clock.
+const DIVIDER_BITS: u8 = 0x70;
+/// Status A: the divider counts a 32.768 kHz crystal, so the clock runs.
+const DIVIDER_32KHZ: u8 = 0x20;
+/// Status A at power-on: the 32.768 kHz divider and a 1024 Hz periodic rate.
+const STATUS_A_AT_POWER_ON: u8 = 0x26;
+/// Status B: set mode stops the clock so the guest can write the time.
+const SET_MODE: u8 = 0x80;
+/// Status B: the time registers hold plain numbers instead of BCD.
+const BINARY_MODE: u8 = 0x04;
+/// Status B: hours count 0 to 23, the only mode modelled.
+const HOURS_24_MODE: u8 = 0x02;
+/// Status D: the RAM and the time are valid.
+const TIME_VALID: u8 = 0x80;
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const SECONDS_PER_DAY: i64 = 86_400;
+/// The Gregorian calendar repeats every 400 years, an era of this many days.
+const DAYS_PER_ERA: i64 = 146_097;
+/// The date helpers count years from March, so leap days fall at a year's
+/// end; this many days separate 0000-03-01 from 1970-01-01.
+const DAYS_FROM_0000_03_01_TO_1970: i64 = 719_468;
 
 /// The CMOS RTC and its 128 bytes of CMOS RAM.
 pub(crate) struct CmosRtc {
     /// The register the next data-port access selects.
-    index: usize,
+    selected: usize,
     /// The status registers, NVRAM, and the time while the clock is stopped.
     registers: [u8; 128],
     /// Guest time minus the clock, in nanoseconds.
@@ -93,11 +99,11 @@ pub(crate) struct CmosRtc {
 impl CmosRtc {
     pub(crate) fn new(clock: Clock) -> Self {
         let mut registers = [0; 128];
-        registers[RTC_REG_A] = REG_A_DEFAULT;
-        registers[RTC_REG_B] = RTC_24H;
-        registers[RTC_REG_D] = RTC_VRT;
+        registers[STATUS_A] = STATUS_A_AT_POWER_ON;
+        registers[STATUS_B] = HOURS_24_MODE;
+        registers[STATUS_D] = TIME_VALID;
         Self {
-            index: 0,
+            selected: 0,
             registers,
             offset_from_clock: 0,
             century_written: false,
@@ -105,52 +111,52 @@ impl CmosRtc {
         }
     }
 
-    /// Whether the time advances: SET is clear and the divider is not in reset.
+    /// Whether the time advances: set mode is off and the divider is not in reset.
     fn clock_running(&self) -> bool {
-        self.registers[RTC_REG_B] & RTC_SET == 0
-            && self.registers[RTC_REG_A] & RTC_DIV_CTL <= RTC_REF_CLCK_32KHZ
+        self.registers[STATUS_B] & SET_MODE == 0
+            && self.registers[STATUS_A] & DIVIDER_BITS <= DIVIDER_32KHZ
     }
 
     fn guest_time_nanos(&self) -> i64 {
         (self.clock)().saturating_add(self.offset_from_clock)
     }
 
-    fn read_register(&self, index: usize) -> u8 {
-        match index {
-            _ if TIME_REGISTERS.contains(&index) && self.clock_running() => {
-                self.time_register(index, self.guest_time_nanos())
+    fn read_register(&self, register: usize) -> u8 {
+        match register {
+            _ if TIME_REGISTERS.contains(&register) && self.clock_running() => {
+                self.time_register(register, self.guest_time_nanos())
             }
-            RTC_REG_A => self.registers[RTC_REG_A] & !RTC_UIP,
-            RTC_REG_C => 0,
-            _ => self.registers[index],
+            STATUS_A => self.registers[STATUS_A] & !UPDATE_IN_PROGRESS,
+            STATUS_C => 0,
+            _ => self.registers[register],
         }
     }
 
-    fn write_register(&mut self, index: usize, value: u8) {
+    fn write_register(&mut self, register: usize, value: u8) {
         let was_running = self.clock_running();
-        match index {
-            RTC_REG_A => self.registers[RTC_REG_A] = value & !RTC_UIP,
-            RTC_REG_B => self.registers[RTC_REG_B] = value | RTC_24H,
-            RTC_REG_C | RTC_REG_D => {}
-            _ if TIME_REGISTERS.contains(&index) => {
-                self.century_written |= index == CENTURY;
+        match register {
+            STATUS_A => self.registers[STATUS_A] = value & !UPDATE_IN_PROGRESS,
+            STATUS_B => self.registers[STATUS_B] = value | HOURS_24_MODE,
+            STATUS_C | STATUS_D => {}
+            _ if TIME_REGISTERS.contains(&register) => {
+                self.century_written |= register == CENTURY;
                 if was_running {
                     // Change one field of the running time, and keep how far
                     // into its second the clock was.
                     let now = self.guest_time_nanos();
                     self.freeze_time(now);
-                    self.registers[index] = value;
+                    self.registers[register] = value;
                     self.restart_from_registers(now.rem_euclid(NANOS_PER_SECOND));
                 } else {
-                    self.registers[index] = value;
+                    self.registers[register] = value;
                 }
             }
-            _ => self.registers[index] = value,
+            _ => self.registers[register] = value,
         }
         match (was_running, self.clock_running()) {
             (true, false) => self.freeze_time(self.guest_time_nanos()),
             // Linux writes the time half a second before that time is due,
-            // whether it restarts the clock through SET or the divider.
+            // whether it restarts the clock through set mode or the divider.
             (false, true) => self.restart_from_registers(NANOS_PER_SECOND / 2),
             _ => {}
         }
@@ -159,8 +165,8 @@ impl CmosRtc {
     /// Writes the time at `nanos` into the time registers, which keep it
     /// until the clock restarts.
     fn freeze_time(&mut self, nanos: i64) {
-        for index in TIME_REGISTERS {
-            self.registers[index] = self.time_register(index, nanos);
+        for register in TIME_REGISTERS {
+            self.registers[register] = self.time_register(register, nanos);
         }
     }
 
@@ -176,13 +182,9 @@ impl CmosRtc {
     /// The time in the registers, `fraction_nanos` into its second, or `None`
     /// when a field is out of range.
     fn registers_time_nanos(&self, fraction_nanos: i64) -> Option<i64> {
-        let field = |index: usize| self.decode(self.registers[index]);
-        let (second, minute, hour) = (field(RTC_SECONDS)?, field(RTC_MINUTES)?, field(RTC_HOURS)?);
-        let (day, month, year) = (
-            field(RTC_DAY_OF_MONTH)?,
-            field(RTC_MONTH)?,
-            field(RTC_YEAR)?,
-        );
+        let field = |register: usize| self.decode(self.registers[register]);
+        let (second, minute, hour) = (field(SECONDS)?, field(MINUTES)?, field(HOURS)?);
+        let (day, month, year) = (field(DAY_OF_MONTH)?, field(MONTH)?, field(YEAR)?);
         if second > 59
             || minute > 59
             || hour > 23
@@ -206,32 +208,32 @@ impl CmosRtc {
             .checked_add(fraction_nanos)
     }
 
-    /// Time register `index` at guest time `nanos`, encoded as register B says.
-    fn time_register(&self, index: usize, nanos: i64) -> u8 {
+    /// Time register `register` at guest time `nanos`, in the format status B selects.
+    fn time_register(&self, register: usize, nanos: i64) -> u8 {
         let seconds = nanos.div_euclid(NANOS_PER_SECOND);
         let days = seconds.div_euclid(SECONDS_PER_DAY);
-        let of_day = seconds.rem_euclid(SECONDS_PER_DAY);
+        let second_of_day = seconds.rem_euclid(SECONDS_PER_DAY);
         let (year, month, day) = civil_from_days(days);
-        let value = match index {
-            RTC_SECONDS => of_day % 60,
-            RTC_MINUTES => of_day / 60 % 60,
-            RTC_HOURS => of_day / 3600,
+        let value = match register {
+            SECONDS => second_of_day % 60,
+            MINUTES => second_of_day / 60 % 60,
+            HOURS => second_of_day / 3600,
             // 1970-01-01 was a Thursday, and Sunday is 1.
-            RTC_DAY_OF_WEEK => (days + 4).rem_euclid(7) + 1,
-            RTC_DAY_OF_MONTH => day,
-            RTC_MONTH => month,
-            RTC_YEAR => year.rem_euclid(100),
+            DAY_OF_WEEK => (days + 4).rem_euclid(7) + 1,
+            DAY_OF_MONTH => day,
+            MONTH => month,
+            YEAR => year.rem_euclid(100),
             _ => year.div_euclid(100).rem_euclid(100),
         };
         self.encode(value as u8)
     }
 
-    fn binary_mode(&self) -> bool {
-        self.registers[RTC_REG_B] & RTC_DM_BINARY != 0
+    fn in_binary_mode(&self) -> bool {
+        self.registers[STATUS_B] & BINARY_MODE != 0
     }
 
     fn encode(&self, value: u8) -> u8 {
-        if self.binary_mode() {
+        if self.in_binary_mode() {
             value
         } else {
             ((value / 10) << 4) | (value % 10)
@@ -240,7 +242,7 @@ impl CmosRtc {
 
     /// A time register value, or `None` for a byte that is not BCD in BCD mode.
     fn decode(&self, raw: u8) -> Option<i64> {
-        if self.binary_mode() {
+        if self.in_binary_mode() {
             return Some(raw.into());
         }
         let (tens, ones) = (raw >> 4, raw & 0x0f);
@@ -251,8 +253,8 @@ impl CmosRtc {
 impl BusDevice for CmosRtc {
     fn read(&mut self, offset: u64, data: &mut [u8]) {
         match (offset, data) {
-            (1, [value]) => *value = self.read_register(self.index),
-            // The index port is write-only, and registers take byte accesses.
+            (1, [value]) => *value = self.read_register(self.selected),
+            // The select port is write-only, and registers take byte accesses.
             (_, data) => data.fill(UNCLAIMED_READ),
         }
     }
@@ -260,8 +262,8 @@ impl BusDevice for CmosRtc {
     fn write(&mut self, offset: u64, data: &[u8]) {
         match (offset, data) {
             // Bit 7 masks NMI on a PC; there is no NMI source to mask here.
-            (0, [value]) => self.index = usize::from(value & 0x7f),
-            (1, [value]) => self.write_register(self.index, *value),
+            (0, [value]) => self.selected = usize::from(value & 0x7f),
+            (1, [value]) => self.write_register(self.selected, *value),
             _ => {}
         }
     }
@@ -270,9 +272,9 @@ impl BusDevice for CmosRtc {
 /// The proleptic Gregorian date `days` after 1970-01-01, as Howard Hinnant's
 /// `civil_from_days` computes it.
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
+    let days_since_0000_03_01 = days + DAYS_FROM_0000_03_01_TO_1970;
+    let era = days_since_0000_03_01.div_euclid(DAYS_PER_ERA);
+    let day_of_era = days_since_0000_03_01.rem_euclid(DAYS_PER_ERA);
     let year_of_era =
         (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
@@ -294,7 +296,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year_of_era = year.rem_euclid(400);
     let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
+    era * DAYS_PER_ERA + day_of_era - DAYS_FROM_0000_03_01_TO_1970
 }
 
 #[cfg(test)]
