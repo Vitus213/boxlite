@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use super::add_legacy;
+use super::add_legacy_devices;
 use crate::{
     chipset::ChipsetBuilder,
     devices::console::ConsoleWorker,
@@ -73,7 +73,7 @@ fn a_flat_guest_drives_the_legacy_platform_until_its_reset() {
     let (writer, mut console) = ConsoleWorker::spawn(Box::new(output.clone()), 1024).unwrap();
     let mut events = EventLoop::new().unwrap();
     let mut builder = ChipsetBuilder::new(guest.vm().clone(), events.sender());
-    add_legacy(&mut builder, writer, Box::new(|| CMOS_TIME)).unwrap();
+    add_legacy_devices(&mut builder, writer, Box::new(|| CMOS_TIME)).unwrap();
     let chipset = builder.build().unwrap();
 
     // The run stops at the first event, so the guest runs no instruction

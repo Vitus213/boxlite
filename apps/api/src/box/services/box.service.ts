@@ -86,6 +86,7 @@ import { Region } from '../../region/entities/region.entity'
 import { BoxActivityService } from './box-activity.service'
 import { assertWithinPerBoxLimits } from './per-box-limits'
 import { requiresFreshBox } from '../utils/warm-pool-eligibility.util'
+import { OutboundPolicy, setRunnerOutbound } from '../runner-adapter/network-policy'
 import { isCuratedSelector, withoutRegistryProxy } from '../../image/utils/image-ref.util'
 import {
   AUTO_DELETE_DISABLED,
@@ -362,7 +363,12 @@ export class BoxService {
       // before the insert: it has no way to give a slot back, so a create its
       // own input or placement refuses must not spend one. Only the box limit
       // and a name collision, which the insert itself settles, come after it.
-      const insertedBox = await this.persistOnAvailableRunner(box, { regions: [region.id], boxClass }, async () => {
+      const runnerParams: GetRunnerParams = {
+        regions: [region.id],
+        boxClass,
+        requireReadOnlyVolumes: box.volumes?.some((volume) => volume.readOnly) || undefined,
+      }
+      const insertedBox = await this.persistOnAvailableRunner(box, runnerParams, async () => {
         await this.imageAdmissionService.spendColdPullBudget(organization, resolvedImage)
         return createBoxDto.name
           ? this.boxRepository.insert(box, options.maxCreatedBoxes)
@@ -1337,6 +1343,20 @@ export class BoxService {
     }
 
     return updatedBox
+  }
+
+  async setOutboundNetwork(boxIdOrName: string, policy: OutboundPolicy, organizationId: string): Promise<Box> {
+    if (policy.mode === 'disabled' && policy.allow_net.length) {
+      throw new BadRequestError('disabled outbound cannot include allow_net')
+    }
+    const allowNet = this.resolveOutboundAllowNet(policy.allow_net) ?? []
+    const box = await this.findOneByIdOrName(boxIdOrName, organizationId)
+    const resolved = { ...policy, allow_net: allowNet }
+    return this.boxRepository.replaceOutbound(box.id, organizationId, resolved, async (locked, next) => {
+      const runner = await this.runnerService.findOne(locked.runnerId)
+      if (!runner) throw new ConflictException('Box runner is unavailable')
+      await setRunnerOutbound(runner, locked.id, next)
+    })
   }
 
   // used by internal services to update the state of a box to resolve domain and runner state mismatch

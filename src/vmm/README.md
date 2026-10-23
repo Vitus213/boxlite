@@ -1,18 +1,18 @@
 # boxlite-vmm
 
-BoxLite's native VMM. `Vm::new` validates the machine configuration, creates
-the host VM and registers guest RAM. The crate-visible VM and vCPU `run` entry
-points still sketch event dispatch, guest exits, and worker cleanup with inline
-`todo!()` operations that panic if called; vCPU exits use
-`boxlite_hypervisor::VcpuExit`, and `Error` wraps `boxlite_hypervisor::Error`
-with its cause chain intact. This crate cannot boot a kernel yet. The
+BoxLite's native VMM. On Linux x86_64, `Vm::new` validates the machine
+configuration, creates the KVM VM, registers guest RAM and loads the kernel and
+boot data; `Vm::run` runs every vCPU until the guest powers off or resets, or a
+`StopHandle` stops it, and returns how the VM ended (see [Lifecycle](#lifecycle)).
+`Error` wraps `boxlite_hypervisor::Error` with its cause chain intact. The
 [VMM design](../../docs/contributing/architecture/vmm/README.md) specifies the
-lifecycle API, memory layout, buses, interrupts, and threads it will implement.
+lifecycle API, memory layout, buses, interrupts, and threads.
 
-The lifecycle types and `Error` remain crate-visible while those entry points
-are placeholders. M1 will make the implemented `Vm`, `VmExit`, `Error` and
-`Result` public together; M2's engine adapter will then consume that API and
-inspect the error's host cause.
+`Vm`, `VmConfig`, `VmExit`, `StopHandle`, `Error` and `Result` are public, as
+are `BusKind` and `Conflict`, which `Error::ChipsetConflicts` carries; M2's
+engine adapter will consume that API and inspect the error's host cause.
+`Vm::new` adds no device to its chipset yet, so it boots a guest without a
+console.
 
 ```text
 boxlite-vmm
@@ -23,22 +23,23 @@ boxlite-vmm
 └── linux-loader (Linux x86_64 ELF loading and boot parameters)
 ```
 
-| Module | Planned responsibility |
+| Module | Responsibility |
 | --- | --- |
-| `vm` | `Vm<H>`: validate the configuration, then allocate and register RAM on host backend `H`; `run` is a placeholder |
+| `vm` | `Vm<H>`: validate the configuration, allocate and register RAM on host backend `H`, own the devices in a `Chipset`, load the boot data, and run the vCPUs until the first event; `StopHandle` and `VmExit` |
 | `boot` | Linux x86_64 boot: `prepare` loads the pinned ELF kernel through linux-loader, places an optional initramfs at the top of RAM, writes the zero page, E820 map, command line and MP table, and sets up the 64-bit entry state (GDT, identity page tables, registers) |
 | `config` | `VmConfig { vcpu_count, memory_mib, kernel, cmdline, initramfs }` and its bounds: 1..=64 vCPUs, 1..=3072 MiB, a printable-ASCII command line under 2048 bytes |
 | `error` | VMM errors that keep the hypervisor's cause chain |
 | `memory` | `GuestRam`: owned guest RAM, the RAM layout, and the registration lifetime rules |
 | `cpu_features` | x86_64 guest CPUID for each vCPU and the boot MSRs |
-| `vcpu` | Worker threads, stop coordination, and exit handling |
+| `vcpu` | x86_64 vCPU workers: create and configure each vCPU, hold them at a start gate, run the guest and dispatch its exits until the VM ends |
 | `chipset` | `ChipsetBuilder`, the one registry of ranges and interrupt lines, and `Chipset`, the read-only machine it builds |
 | `bus` | `Bus`, `BusRange` and `BusDevice`, and `Buses::dispatch`, which serves the MMIO and port exits of a vCPU |
 | `irq` | `IrqChip`, the host interrupt controller as devices see it, and `IrqLine`, one device line; HVF and KVM provide the controller, WHP (M10) only local APICs |
-| `devices` | The console queue, and on x86_64 the 8250 UART at COM1, the CMOS RTC and the i8042 reset, with `add_legacy`, which adds them to the chipset |
-| `events` | `Event`, which ends the VM, `EventSender`, and `EventLoop`, the poller that waits for the first event |
+| `devices` | The console queue, and on x86_64 the 8250 UART at COM1, the CMOS RTC and the i8042 reset, with `add_legacy_devices`, which adds them to the chipset |
+| `events` | `Event`, which ends the VM, `EventSender`, which also latches the stop, and `EventLoop`, the poller that waits for the first event |
 
-Backend implementation and guest boot follow in M1. Virtio devices, the BoxLite
+The x86_64 KVM boot and lifecycle are in place; the M1 devices, arm64 and HVF
+follow in M1. Virtio devices, the BoxLite
 engine adapter, engine selection, and `native` feature wiring follow in M2.
 Neither new crate depends on `boxlite-shared`, and both are unpublished while
 their interfaces are being established.
@@ -77,8 +78,7 @@ segment loading to rust-vmm's linux-loader and returns the entry address as
 `io::Result<u64>`. It reads `kernel` through a seekable reader, usually the
 kernel file, so segments go straight into guest RAM without buffering the
 whole image. It uses vm-memory 0.18 and linux-loader 0.14 with only the ELF
-feature. The function stays crate-visible until the lifecycle slice wires
-it into `Vm::new`; the VM cannot boot Linux yet.
+feature. `boot::prepare` calls it for `Vm::new`.
 
 Pass the pinned `vmlinux` from `make vmm:boot` and fresh zero-filled guest
 RAM before guest execution. BSS relies on that initial zero state. Validation
@@ -127,7 +127,7 @@ whitespace.
 `write_mptable` and `long_mode_entry`, in that order on fresh RAM, and returns
 a `BootSetup` with the boot vCPU registers. A failure names its step,
 `LoadKernel`, `LoadInitramfs` or `WriteBootData`, and keeps the I/O cause.
-Nothing calls `prepare` from `Vm` yet.
+`Vm::new` calls `prepare` once RAM is registered.
 
 ## MP table
 
@@ -180,16 +180,12 @@ The boot tests need Linux x86_64, read/write `/dev/kvm` and the same
 make test:integration:vmm:linux
 ```
 
-Each runs `prepare` for 256 MiB of RAM, then runs each KVM vCPU on its own
-thread with its guest CPUID and the boot MSRs on the
+Each builds a KVM `Vm` with `prepare` for 256 MiB of RAM on the
 [legacy devices](#legacy-devices-and-the-console), with the CMOS RTC stopped
-at 2026-01-02T03:04:05Z. Every vCPU is created
-before any runs, and only vCPU 0 gets the entry registers. Each thread serves
-its exits through `Chipset::dispatch` and looks for an event before it enters
-the guest again, so the vCPU that served the exit sending the first event
-runs no instruction after it; every vCPU is then kicked. A watchdog kicks
-them at the timeout, 30 seconds unless stated, so a hung boot fails with the
-serial log so far.
+at 2026-01-02T03:04:05Z, and runs it with `Vm::run`. The host VM is KVM behind a test wrapper that counts the edges
+devices raise on GSI 4 and can drop every interrupt. A watchdog stops a boot
+at its timeout, 30 seconds unless stated, so a failed boot reports the serial
+log so far.
 
 - With `earlycon=uart8250,io,0x3f8 keep_bootcon panic=-1 reboot=k`, one
   vCPU and no initramfs, the log must show the kernel version, the exact
@@ -211,7 +207,8 @@ serial log so far.
   log must show the 16550A on IRQ 4, `rtc_cmos rtc_cmos: setting system
   clock to 2026-01-02T03:04:05 UTC (1767323045)`, that line and
   `reboot: Restarting system`, in that order. GSI 4 must have been raised,
-  and the only access no device claimed must be the read of port `0x87`.
+  no MMIO access may go unclaimed, and the only unclaimed port access must
+  be one read: Linux's probe of port `0x87`.
 - The same boot with a console sink that takes nothing until the run has
   ended, and a 4 KiB queue, must still end with `GuestReset`. The queue drops
   the oldest bytes and counts them; the sink then gets the batch the worker
@@ -220,17 +217,52 @@ serial log so far.
   `Run /init as init process` but not the start of `/init`'s line, and end at
   a 3-second timeout. Against vm-superio 0.8.1 it fails: the first 16 bytes
   leave without IRQ 4.
+- With the earlycon command line, one vCPU and an `/init` that calls `pause`
+  forever, a `StopHandle::stop` sent once `Run /init as init process`
+  appears must make `Vm::run` return `StopRequested` within two seconds.
 
-Each run but the last must end with `GuestReset`: `panic=-1 reboot=k` turns a
-panic, and the restart, into the i8042 reset.
+The boot with every interrupt dropped and the stopped boot end in
+`StopRequested`. Every other boot must end in `GuestReset`: `panic=-1
+reboot=k` turns a panic, and the restart, into the i8042 reset.
+
+## Lifecycle
+
+`Vm::run` runs on x86_64, against any backend that implements
+`boxlite_hypervisor::X86Vm`; unit tests drive it on the mock backend. Before
+it registers any RAM, `Vm::with_backend` builds the `Chipset` from the
+devices it is given, so a conflict fails with `ChipsetConflicts` and leaves
+nothing mapped.
+
+1. It starts one scoped thread per vCPU, named `vcpuN`. Each creates its vCPU,
+   sets its CPUID from `vcpu_cpuid` and the boot MSRs, and on vCPU 0 the entry
+   registers, then waits at a start gate until every vCPU is configured. A
+   vCPU that fails setup sends `VcpuFailed` before it arrives, so the latch
+   keeps every vCPU out of the guest, and a thread that fails to start aborts
+   the gate, so no worker waits forever.
+2. Each worker then loops: check the stop latch, run, and hand the exit to
+   `Chipset::dispatch`. `Shutdown` sends `GuestShutdown` and `Reset` sends
+   `GuestReset`; a run error, any other exit, such as `Halted`, which KVM never
+   returns with its in-kernel irqchip, or a panic caught around the worker
+   sends `VcpuFailed`. A worker that sees the latch completes the pending
+   access and returns without sending.
+3. `EventSender::send` sets the stop latch before it queues, so the vCPU
+   that sends, such as the one whose `0xFE` reached the i8042, never enters
+   the guest again. `run` takes the first event from the `EventLoop`, kicks
+   every vCPU, and joins them all before it returns: `StopRequested`,
+   `GuestShutdown` and `GuestReset` become `VmExit`, and `VcpuFailed` or
+   `DeviceFailed` its error. Later events are dropped.
+
+`Vm::stop_handle` returns a `StopHandle` that sends `StopRequested` from any
+thread, even before `run` starts. A VM runs once: a second `run` fails with
+`AlreadyRan`, since its latch stays set and its vCPUs already exist.
 
 ## Long-mode entry
 
 On Linux x86_64, `boot::entry::long_mode_entry(ram, entry, boot_params)`
 writes the state that the Linux 64-bit boot protocol requires
 (`Documentation/arch/x86/boot.rst`, "64-bit Boot Protocol") and returns the
-boot vCPU registers. vCPU workers will apply them after the vCPU's CPUID and
-MSRs; nothing calls it from `Vm` yet.
+boot vCPU registers, which the vCPU 0 worker applies after its CPUID and
+MSRs.
 
 - Guest RAM: the GDT at `0x500` holds flat `__BOOT_CS` (`0x10`) and
   `__BOOT_DS` (`0x18`). Page tables from `0x9000` identity-map
@@ -265,7 +297,8 @@ vCPU; Linux programs LINT1 itself.
 ## Buses, lines and events
 
 These are the pieces the [legacy devices](#legacy-devices-and-the-console)
-are built from; no VM wires them up yet.
+are built from. `Vm` owns the chipset they form, but `Vm::new` adds no
+device yet.
 
 - **Buses.** `bus::Bus` maps non-overlapping `BusRange`s, each named by its
   owner, to a `BusDevice` and the register offset the device sees at the
@@ -281,14 +314,18 @@ are built from; no VM wires them up yet.
   port `0x87` once at boot and takes `0xFF` as no ISA DMA controller. Reads
   reach a device zero-filled. A device whose lock an earlier panic poisoned
   stops the next access too.
-- **Lines.** `irq::IrqLine` drives one line through `IrqChip`, which every
-  host VM implements with `Vm::set_irq_line`. It is not `Clone`. `pulse`
-  raises an edge; `set_level` holds a level, makes no host call for a repeated
-  level and keeps the old level when the host call fails, so the next call
-  retries. Dropping a line held high lowers it.
+- **Lines.** `irq::IrqLine` drives one line through `IrqChip::set_line`,
+  which every host VM implements with `Vm::set_irq_line`; the distinct name
+  keeps the two traits from colliding where both are in scope. It is not
+  `Clone`. `pulse` raises an edge; `set_level` holds a level, makes no host
+  call for a repeated level and keeps the old level when the host call fails,
+  so the next call retries. Dropping a line held high lowers it and logs a
+  failure to do so.
 - **Events.** A device ends the VM by sending `Event::GuestReset` or
   `Event::DeviceFailed` through an `EventSender`, which never blocks or
-  panics and wakes the `EventLoop`'s `mio` poller. `EventLoop::wait` returns
+  panics, latches the stop for every vCPU, and wakes the `EventLoop`'s `mio`
+  poller. vCPU workers and `StopHandle` send the other events. An event sent
+  after the loop is gone is logged at debug level and discarded. `EventLoop::wait` returns
   the oldest event, or `None` at its timeout, and rechecks the queue every
   second in case a wake-up was lost. Every event ends the VM; the VMM never
   restarts a guest.
@@ -296,36 +333,39 @@ are built from; no VM wires them up yet.
 ## Chipset
 
 `chipset::ChipsetBuilder` is the one registry of port ranges, MMIO ranges and
-interrupt lines, as OpenVMM's chipset builder is. Platform code reserves the
+interrupt lines, like OpenVMM's chipset builder. Platform code reserves the
 windows the host serves in the kernel, then adds each device by name with a
 closure that claims the device's resources from a `Resources` handle and
-returns the device. `build` reports every conflict at once, naming both sides,
-or returns an immutable `Chipset` that owns the devices:
+returns the device. `build` reports every conflict at once, naming the
+claimant and the owner, or returns an immutable `Chipset` that owns the
+devices:
 
 ```text
 5 chipset conflict(s): intruder claims port range 0x3fe+0x4, held by com1; intruder claims port range 0x42+0x1, held by in-kernel PIT; intruder claims MMIO range 0xfee00800+0x10, held by in-kernel local APIC; intruder claims MMIO range 0x1000+0x0, which is empty or wraps; intruder claims interrupt line 4, held by com1;
 ```
 
 - **Claims.** A claim never fails: `Resources` records it, so the closure
-  always finishes and every later claim is still checked. `pio_at` gives a
-  range the register offset it starts at, for a controller whose ports are
-  not contiguous.
+  always finishes and every later claim is still checked. A rejected claim
+  leaves the range or line with its first owner, so every later conflict
+  names that owner. `pio_with_offset` sets the device offset a range's first
+  port reaches, for a controller whose ports are split across several ranges.
 - **Constructors.** A constructor only claims resources and builds state; a
   device that needs a thread starts it after `build`. A line from
-  `Resources::line` stays inert until `build` succeeds: using it earlier fails
-  without a host call, so a device that a conflict discards never raised
-  anything. On a conflict, every device drops without having run.
+  `Resources::line` is not armed until `build` succeeds: using it earlier
+  fails with `Error::LineNotArmed` and makes no host call, so a device that a
+  conflict discards never raised anything. On a conflict, every device drops
+  without having run.
 - **Dispatch.** `Chipset::dispatch` hands a vCPU exit to the buses and
   returns every exit that is not MMIO or port I/O. The chipset never changes
   after the build, so every vCPU thread shares it without a lock of its own.
 
 ## Legacy devices and the console
 
-On x86_64, `devices::x86_64::add_legacy` reserves the in-kernel PIC
+On x86_64, `devices::x86_64::add_legacy_devices` reserves the in-kernel PIC
 (`0x20`, `0xA0`, `0x4D0`), PIT (`0x40`–`0x43`, `0x61`), IOAPIC and local APIC
 windows, then adds the legacy devices:
 
-| Ports | Device | Behaviour |
+| Ports | Device | Behavior |
 | --- | --- | --- |
 | `0x3F8`–`0x3FF` | `com1`, vm-superio's 16550A | Output goes to the console queue; a pending, enabled THRE or RDA raises an edge on GSI 4; no input yet |
 | `0x70`–`0x71` | `cmos` | See [CMOS RTC](#cmos-rtc) |
@@ -350,9 +390,11 @@ windows, then adds the legacy devices:
 
 ## CMOS RTC
 
-On x86_64, `devices::cmos::CmosRtc` is the MC146818 behind ports `0x70`
-(index) and `0x71` (data). Linux reads it once at boot through
-`RTC_HCTOSYS`; the boot wall clock itself comes from kvmclock.
+On x86_64, `devices::cmos::CmosRtc` is the PC's real-time clock. The guest
+writes a register number to port `0x70`, then reads or writes that register
+at `0x71`. Linux reads the date and time from it once at boot to set its
+system clock. Register numbers and bits carry their names from Linux's
+`include/linux/mc146818rtc.h`.
 
 - The time is an injected `Clock` plus an offset that keeps any time the
   guest sets. `cmos::host_clock` reads the host wall clock; the tests inject

@@ -50,19 +50,51 @@ for (const [path, expected] of [
   ['make/coverage.mk', ['rust', 'python', 'node', 'go']],
   ['make/quality.mk', ['go']],
   ['.github/workflows/lint.yml', ['go', 'infra']],
+  ['openapi/box.openapi.yaml', ['rust', 'api']],
+  ['openapi/admin.openapi.yaml', ['rust', 'api']],
 ] as const) {
   test(`source and shared recipes retain their tests: ${path}`, () => {
     assert.deepEqual(testSuites(['docs/README.md', path]), [...expected])
   })
 }
 
-// Anything the `go` filter selects on must also reach the workflow that runs
+// Anything a suite filter selects on must also reach the workflow that runs
 // the filter, or a push to main changes the suite's inputs and tests nothing.
-for (const path of ['apps/runner/cmd/runner/main.go', 'apps/go.work', 'apps/go.work.sum']) {
-  test(`a push that selects the go suite reaches the Test workflow: ${path}`, () => {
+for (const path of ['apps/runner/cmd/runner/main.go', 'apps/go.work', 'apps/go.work.sum', 'openapi/box.openapi.yaml', 'openapi/admin.openapi.yaml']) {
+  test(`a push that selects a suite reaches the Test workflow: ${path}`, () => {
     assert.equal(acceptsFiles('test.yml', 'push', [path]), true)
   })
 }
+
+// The nix job rebuilds the CLI in the flake dev shell; it must follow every
+// input of `make cli` there, including on push to main, and nothing else.
+for (const path of ['flake.nix', 'flake.lock', 'src/deps/libkrun-sys/build.rs', 'src/shared/build.rs',
+  'scripts/build/build-shim.sh', 'scripts/common.sh', 'scripts/setup/setup-common.sh', 'make/build.mk',
+  'Cargo.lock', 'rust-toolchain.toml', '.github/actions/sccache/action.yml']) {
+  test(`a change to a dev shell build input runs the nix job: ${path}`, () => {
+    assert.ok(testSuites([path]).includes('nix'))
+    assert.equal(acceptsFiles('test.yml', 'push', [path]), true)
+  })
+}
+
+for (const path of ['docs/README.md', 'make/help.mk', 'src/deps/libkrun-sys/README.md', 'sdks/go/options.go']) {
+  test(`a change outside the dev shell build skips the nix job: ${path}`, () => {
+    assert.ok(!testSuites([path]).includes('nix'))
+  })
+}
+
+test('the nix job reports without blocking the required conclusion', () => {
+  const jobs = workflow('test.yml').jobs
+  assert.equal(jobs.nix.if, "needs.changes.outputs.nix == 'true'")
+  assert.ok(!jobs['test-conclusion'].needs.includes('nix'), 'nix stays non-blocking until it proves stable')
+  // The weekly run skips it: flake.lock pins its inputs. Dispatch still runs it.
+  for (const [event, expected] of [['schedule', false], ['workflow_dispatch', true]] as const) {
+    const selected = runInNewContext(jobs.changes.outputs.nix.replace(/^\$\{\{\s*|\s*\}\}$/g, ''), {
+      github: { event_name: event }, steps: { filter: { outputs: {} } },
+    }, { timeout: 1000 })
+    assert.equal(selected, expected, event)
+  }
+})
 
 for (const [name, events] of [
   ['codeql.yml', ['pull_request', 'push']],

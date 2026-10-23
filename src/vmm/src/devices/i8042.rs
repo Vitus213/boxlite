@@ -16,16 +16,16 @@ use crate::{
 /// Turns the controller's CPU reset into [`Event::GuestReset`], once: the
 /// first reset ends the VM, and Linux writes up to ten.
 struct ResetTrigger {
-    events: EventSender,
-    sent: Cell<bool>,
+    event_sender: EventSender,
+    reset_sent: Cell<bool>,
 }
 
 impl Trigger for ResetTrigger {
     type E = Infallible;
 
     fn trigger(&self) -> Result<(), Infallible> {
-        if !self.sent.replace(true) {
-            self.events.send(Event::GuestReset);
+        if !self.reset_sent.replace(true) {
+            self.event_sender.send(Event::GuestReset);
         }
         Ok(())
     }
@@ -38,11 +38,11 @@ pub(crate) struct I8042 {
 }
 
 impl I8042 {
-    pub(crate) fn new(events: EventSender) -> Self {
+    pub(crate) fn new(event_sender: EventSender) -> Self {
         Self {
             controller: I8042Device::new(ResetTrigger {
-                events,
-                sent: Cell::new(false),
+                event_sender,
+                reset_sent: Cell::new(false),
             }),
         }
     }

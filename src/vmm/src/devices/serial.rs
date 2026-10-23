@@ -32,17 +32,17 @@ impl Trigger for IrqTrigger {
 /// the VM.
 pub(crate) struct Serial8250 {
     uart: Serial<IrqTrigger, NoEvents, ConsoleWriter>,
-    events: EventSender,
+    event_sender: EventSender,
     /// Whether a failed interrupt was already reported.
-    failed: bool,
+    irq_failed: bool,
 }
 
 impl Serial8250 {
-    pub(crate) fn new(irq: IrqLine, out: ConsoleWriter, events: EventSender) -> Self {
+    pub(crate) fn new(irq: IrqLine, console: ConsoleWriter, event_sender: EventSender) -> Self {
         Self {
-            uart: Serial::new(IrqTrigger(irq), out),
-            events,
-            failed: false,
+            uart: Serial::new(IrqTrigger(irq), console),
+            event_sender,
+            irq_failed: false,
         }
     }
 }
@@ -63,8 +63,8 @@ impl BusDevice for Serial8250 {
             // The console queue never fails, and only input fills the FIFO.
             Ok(()) | Err(UartError::FullFifo | UartError::IOError(_)) => {}
             Err(UartError::Trigger(error)) => {
-                if !std::mem::replace(&mut self.failed, true) {
-                    self.events.send(Event::DeviceFailed(error));
+                if !std::mem::replace(&mut self.irq_failed, true) {
+                    self.event_sender.send(Event::DeviceFailed(error));
                 }
             }
         }

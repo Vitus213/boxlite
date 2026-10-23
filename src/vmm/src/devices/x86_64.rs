@@ -15,19 +15,19 @@ use crate::{
     error::Result,
 };
 
-/// The first serial port, and the GSI of its interrupt.
+// COM1 and the interrupt line (GSI) it raises, the CMOS index port, whose
+// data port follows it, then the i8042 data and command ports.
 pub(crate) const COM1: u64 = 0x3f8;
 pub(crate) const COM1_GSI: u32 = 4;
-/// The CMOS index port; the data port follows it.
 pub(crate) const CMOS: u64 = 0x70;
-/// The i8042 data and command ports, vm-superio's registers 0 and 4.
 pub(crate) const I8042_DATA: u64 = 0x60;
 pub(crate) const I8042_COMMAND: u64 = 0x64;
 
 /// Reserves the windows the host serves in the kernel, so a device placed
 /// there fails the build, then adds COM1 on GSI 4, writing to `console`, the
-/// CMOS RTC on `clock`, and the i8042, whose reset ends the VM.
-pub(crate) fn add_legacy(
+/// CMOS RTC, which reads the time from `clock`, and the i8042, whose reset
+/// ends the VM.
+pub(crate) fn add_legacy_devices(
     builder: &mut ChipsetBuilder,
     console: ConsoleWriter,
     clock: Clock,
@@ -46,7 +46,7 @@ pub(crate) fn add_legacy(
 
     builder.add("com1", |r| {
         r.pio(COM1, 8);
-        Ok(Serial8250::new(r.line(COM1_GSI), console, r.events()))
+        Ok(Serial8250::new(r.line(COM1_GSI), console, r.event_sender()))
     })?;
     builder.add("cmos", |r| {
         r.pio(CMOS, 2);
@@ -54,8 +54,8 @@ pub(crate) fn add_legacy(
     })?;
     builder.add("i8042", |r| {
         r.pio(I8042_DATA, 1);
-        r.pio_at(I8042_COMMAND, 1, 4);
-        Ok(I8042::new(r.events()))
+        r.pio_with_offset(I8042_COMMAND, 1, 4);
+        Ok(I8042::new(r.event_sender()))
     })
 }
 

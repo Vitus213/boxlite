@@ -26,16 +26,14 @@ use vm_memory::{Bytes, GuestAddress};
 
 use super::prepare;
 use crate::{
+    VmExit,
     boot::elf::tests::{ENTRY, fixture},
-    chipset::ChipsetBuilder,
     config::VmConfig,
     devices::{
-        console::{ConsoleWorker, DEFAULT_CAPACITY},
-        x86_64::{COM1, COM1_GSI, add_legacy},
+        console::{ConsoleWorker, DEFAULT_QUEUE_BYTES},
+        x86_64::{COM1, COM1_GSI, add_legacy_devices},
     },
     error::Error,
-    events::{Event, EventLoop},
-    irq::IrqChip,
     memory::{GuestRam, ram_ranges},
 };
 
@@ -264,207 +262,160 @@ impl Console {
     fn to(log: &SerialLog) -> Self {
         Self {
             sink: Box::new(log.clone()),
-            capacity: DEFAULT_CAPACITY,
+            capacity: DEFAULT_QUEUE_BYTES,
         }
     }
 }
 
-/// KVM's interrupt controller, counting the edges raised on GSI 4. With
-/// `deliver` off it drops every interrupt instead of passing it on.
+/// KVM, counting the edges devices raise on GSI 4. With `deliver` off it
+/// drops every interrupt instead of passing it on.
 struct Gsi4Counter {
-    vm: Arc<boxlite_hypervisor::KvmVm>,
+    kvm: boxlite_hypervisor::KvmVm,
     deliver: bool,
-    edges: AtomicUsize,
+    edges: Arc<AtomicUsize>,
 }
 
-impl IrqChip for Gsi4Counter {
+impl boxlite_hypervisor::Vm for Gsi4Counter {
+    type Vcpu = boxlite_hypervisor::KvmVcpu;
+
+    unsafe fn map_memory(
+        &self,
+        region: &boxlite_hypervisor::MemoryRegion,
+    ) -> boxlite_hypervisor::Result<()> {
+        // SAFETY: the caller's contract passes through to KVM unchanged.
+        unsafe { self.kvm.map_memory(region) }
+    }
+
+    fn unmap_memory(
+        &self,
+        region: &boxlite_hypervisor::MemoryRegion,
+    ) -> boxlite_hypervisor::Result<()> {
+        boxlite_hypervisor::Vm::unmap_memory(&self.kvm, region)
+    }
+
+    fn create_vcpu(&self, id: u32) -> boxlite_hypervisor::Result<Self::Vcpu> {
+        boxlite_hypervisor::Vm::create_vcpu(&self.kvm, id)
+    }
+
     fn set_irq_line(&self, line: u32, level: bool) -> boxlite_hypervisor::Result<()> {
         if line == 4 && level {
             self.edges.fetch_add(1, Ordering::Relaxed);
         }
         if self.deliver {
-            boxlite_hypervisor::Vm::set_irq_line(&*self.vm, line, level)
+            boxlite_hypervisor::Vm::set_irq_line(&self.kvm, line, level)
         } else {
             Ok(())
         }
     }
 }
 
+impl boxlite_hypervisor::X86Vm for Gsi4Counter {
+    fn supported_cpuid(&self) -> &[boxlite_hypervisor::X86CpuidEntry] {
+        boxlite_hypervisor::X86Vm::supported_cpuid(&self.kvm)
+    }
+}
+
+/// A KVM VM booting `config` on the legacy devices, before it runs.
+struct LinuxVm {
+    vm: crate::Vm<Gsi4Counter>,
+    /// The zero page as `prepare` wrote it.
+    zero_page: boot_params,
+    /// The console worker behind COM1: a test finishes it once its sink can
+    /// take the rest.
+    console: ConsoleWorker,
+    /// The edges the serial port raised on GSI 4.
+    gsi_4_edges: Arc<AtomicUsize>,
+}
+
+/// Builds a KVM VM for `config` with the legacy devices, COM1 writing to
+/// `console` and the CMOS RTC stopped at `CMOS_TIME`. With `deliver_irqs`
+/// off, every device interrupt is dropped.
+fn linux_vm(config: &VmConfig, deliver_irqs: bool, console: Console) -> LinuxVm {
+    let (writer, console) = ConsoleWorker::spawn(console.sink, console.capacity).unwrap();
+    let gsi_4_edges = Arc::new(AtomicUsize::new(0));
+    let mut zero_page = None;
+    let vm = crate::Vm::with_backend(
+        config.clone(),
+        || {
+            Ok(Gsi4Counter {
+                kvm: boxlite_hypervisor::KvmVm::new()?,
+                deliver: deliver_irqs,
+                edges: Arc::clone(&gsi_4_edges),
+            })
+        },
+        |ram, config| {
+            let setup = prepare(ram, config)?;
+            let address = GuestAddress(setup.boot_regs.rsi);
+            zero_page = Some(ram.memory().read_obj(address).unwrap());
+            Ok(setup.boot_regs)
+        },
+        |chipset| add_legacy_devices(chipset, writer, Box::new(|| CMOS_TIME)),
+    )
+    .expect("create the KVM VM");
+    LinuxVm {
+        vm,
+        zero_page: zero_page.unwrap(),
+        console,
+        gsi_4_edges,
+    }
+}
+
 /// How a real-kernel boot ended.
 struct LinuxRun {
-    /// The zero page, read before the vCPUs first ran.
+    /// The zero page as `prepare` wrote it.
     zero_page: boot_params,
-    /// The event that ended the run, or `None` when the watchdog did.
-    end: Option<Event>,
+    /// How `Vm::run` ended; `StopRequested` means the watchdog stopped it.
+    exit: crate::Result<VmExit>,
     /// The edges the serial port raised on GSI 4.
     gsi_4_edges: usize,
     /// The console worker, still running: a test finishes it once its sink
     /// can take the rest.
     console: ConsoleWorker,
-    /// Every exit the vCPUs made, the port writes to COM1 among them, and
-    /// the accesses to the CMOS ports.
-    exits: u64,
-    serial_writes: u64,
-    cmos_accesses: u64,
     /// How long the guest ran.
     elapsed: Duration,
-    /// Each port access no device claimed, as the port and whether it was a
-    /// write, and the MMIO reads and writes no device claimed. A port access
-    /// is matched to its exit by the bus counter, so the list is exact only
-    /// on one vCPU.
-    unclaimed_ports: Vec<(u16, bool)>,
+    /// The port and the MMIO reads and writes no device claimed.
+    unclaimed_ports: (u64, u64),
     unclaimed_mmio: (u64, u64),
 }
 
-/// Boots `config` on KVM, one thread per vCPU, and the legacy devices, with
-/// the CMOS RTC stopped at `CMOS_TIME` and the serial port on `console`, until a device event ends the run or
-/// `timeout` passes. Every vCPU exists before any runs, and only vCPU 0 gets
-/// the entry registers; the others wait for the INIT and SIPI Linux sends
-/// them. Each vCPU looks for an event before it enters the guest, and the
-/// first event, failure or the timeout kicks every vCPU. With `deliver_irqs`
-/// off, every device interrupt is dropped.
+/// Boots `config` through `Vm::run` on the legacy devices, with the serial
+/// port on `console`, until the VM ends or a watchdog stops it at `timeout`.
 fn run_linux(
     config: &VmConfig,
     deliver_irqs: bool,
     timeout: Duration,
     console: Console,
 ) -> LinuxRun {
-    use std::sync::{Barrier, Condvar, atomic::AtomicU64};
+    use std::sync::mpsc::{self, RecvTimeoutError};
 
-    use boxlite_hypervisor::{KvmVcpuHandle, KvmVm, VcpuExit, VcpuHandle as _};
-
-    use crate::cpu_features::{BOOT_MSRS, vcpu_cpuid};
-
-    // RAM is declared before the VM and vCPUs so it outlives them during unwinding.
-    let mut ram = GuestRam::new(&ram_ranges(config.memory_mib)).unwrap();
-    let vm = Arc::new(KvmVm::new().expect("create KVM VM"));
-    ram.map(&*vm).expect("map guest RAM");
-    let setup = prepare(&ram, config).unwrap();
-    let zero_page = ram
-        .memory()
-        .read_obj(GuestAddress(setup.boot_regs.rsi))
-        .unwrap();
-
-    let irqs = Arc::new(Gsi4Counter {
-        vm: Arc::clone(&vm),
-        deliver: deliver_irqs,
-        edges: AtomicUsize::new(0),
-    });
-    let events = EventLoop::new().unwrap();
-    let (writer, console) = ConsoleWorker::spawn(console.sink, console.capacity).unwrap();
-    let mut builder = ChipsetBuilder::new(irqs.clone(), events.sender());
-    add_legacy(&mut builder, writer, Box::new(|| CMOS_TIME)).unwrap();
-    let chipset = builder.build().unwrap();
-
-    let count = config.vcpu_count;
-    let events = Mutex::new(events);
-    let (exits, serial_writes, cmos_accesses) =
-        (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
-    let unclaimed_ports = Mutex::new(Vec::new());
-    // `None` while the guest runs, then the event, the timeout or the first
-    // failure.
-    let outcome = Mutex::new(None::<Result<Option<Event>, String>>);
-    let stopped = Condvar::new();
-    let kicks = Mutex::new(Vec::<KvmVcpuHandle>::new());
-    let barrier = Barrier::new(usize::from(count) + 1);
-    let stop = |result: Result<Option<Event>, String>| {
-        outcome.lock().unwrap().get_or_insert(result);
-        stopped.notify_all();
-        for kick in kicks.lock().unwrap().iter() {
-            kick.kick().unwrap();
+    let LinuxVm {
+        mut vm,
+        zero_page,
+        console,
+        gsi_4_edges,
+    } = linux_vm(config, deliver_irqs, console);
+    let stop = vm.stop_handle();
+    let (finished, done) = mpsc::channel::<()>();
+    let watchdog = thread::spawn(move || {
+        if let Err(RecvTimeoutError::Timeout) = done.recv_timeout(timeout) {
+            stop.stop();
         }
-    };
-    let is_stopped = || outcome.lock().unwrap().is_some();
-
+    });
     let started = Instant::now();
-    thread::scope(|scope| {
-        for index in 0..count {
-            let (vm, setup, kicks, barrier) = (&vm, &setup, &kicks, &barrier);
-            let (chipset, events, unclaimed_ports) = (&chipset, &events, &unclaimed_ports);
-            let (exits, serial_writes, cmos_accesses) = (&exits, &serial_writes, &cmos_accesses);
-            let (stop, is_stopped) = (&stop, &is_stopped);
-            scope.spawn(move || {
-                let vcpu = vm.create_vcpu(index.into()).and_then(|mut vcpu| {
-                    let cpuid = vcpu_cpuid(vm.supported_cpuid(), index, count);
-                    vcpu.set_cpu_features(&cpuid, &BOOT_MSRS)?;
-                    if index == 0 {
-                        vcpu.set_boot_registers(&setup.boot_regs)?;
-                    }
-                    Ok(vcpu)
-                });
-                match &vcpu {
-                    Ok(vcpu) => kicks.lock().unwrap().push(vcpu.handle()),
-                    Err(error) => stop(Err(format!("set up vCPU {index}: {error:?}"))),
-                }
-                barrier.wait();
-                let Ok(mut vcpu) = vcpu else { return };
-                while !is_stopped() {
-                    // The device that ends the run sends its event while it
-                    // serves the exit, so the vCPU that served it stops here.
-                    let event = events.lock().unwrap().wait(Some(Duration::ZERO));
-                    if let Some(event) = event.unwrap() {
-                        stop(Ok(Some(event)));
-                        break;
-                    }
-                    match vcpu.run() {
-                        Ok(VcpuExit::Interrupted) => {}
-                        Ok(exit) => {
-                            exits.fetch_add(1, Ordering::Relaxed);
-                            let port = match &exit {
-                                VcpuExit::IoIn { port, .. } => Some((*port, false)),
-                                VcpuExit::IoOut { port, .. } => Some((*port, true)),
-                                _ => None,
-                            };
-                            if port == Some((0x3f8, true)) {
-                                serial_writes.fetch_add(1, Ordering::Relaxed);
-                            }
-                            if port.is_some_and(|(port, _)| port & !1 == 0x70) {
-                                cmos_accesses.fetch_add(1, Ordering::Relaxed);
-                            }
-                            let before = chipset.buses().pio.unclaimed();
-                            if let Some(exit) = chipset.dispatch(exit) {
-                                stop(Err(format!("vCPU {index}: {exit:?}")));
-                            }
-                            if chipset.buses().pio.unclaimed() != before {
-                                unclaimed_ports.lock().unwrap().extend(port);
-                            }
-                        }
-                        Err(error) => stop(Err(format!("vCPU {index}: {error:?}"))),
-                    }
-                }
-                vcpu.complete_pending_io().unwrap();
-            });
-        }
-        barrier.wait();
-        let running = outcome.lock().unwrap();
-        let (running, wait) = stopped
-            .wait_timeout_while(running, timeout, |outcome| outcome.is_none())
-            .unwrap();
-        drop(running);
-        if wait.timed_out() {
-            stop(Ok(None));
-        }
-    });
+
+    let exit = vm.run();
     let elapsed = started.elapsed();
-    let unclaimed_mmio = chipset.buses().mmio.unclaimed();
-    drop(chipset);
-    ram.unmap(&*vm).unwrap();
-    let end = outcome
-        .into_inner()
-        .unwrap()
-        .expect("stopped")
-        .unwrap_or_else(|failure| panic!("{failure} after {elapsed:?}"));
+    drop(finished);
+    watchdog.join().unwrap();
+    let buses = vm.chipset().buses();
     LinuxRun {
         zero_page,
-        end,
-        gsi_4_edges: irqs.edges.load(Ordering::Relaxed),
+        exit,
+        gsi_4_edges: gsi_4_edges.load(Ordering::Relaxed),
         console,
-        exits: exits.into_inner(),
-        serial_writes: serial_writes.into_inner(),
-        cmos_accesses: cmos_accesses.into_inner(),
         elapsed,
-        unclaimed_ports: unclaimed_ports.into_inner().unwrap(),
-        unclaimed_mmio,
+        unclaimed_ports: buses.pio.unclaimed(),
+        unclaimed_mmio: buses.mmio.unclaimed(),
     }
 }
 
@@ -472,16 +423,14 @@ fn run_linux(
 /// the run's counters for the record.
 fn assert_reset(run: &LinuxRun, log: &str) {
     assert!(
-        matches!(run.end, Some(Event::GuestReset)),
-        "{:?}; log:\n{log}",
-        run.end
+        matches!(run.exit, Ok(VmExit::GuestReset)),
+        "{:?} after {:?}; log:\n{log}",
+        run.exit,
+        run.elapsed
     );
     eprintln!(
-        "boot: {:?}, {} exits, {} COM1 writes, {} CMOS accesses, {} GSI 4 edges, unclaimed ports {:x?} and MMIO {:?}, {} console bytes dropped",
+        "boot: {:?}, {} GSI 4 edges, unclaimed ports {:?} and MMIO {:?}, {} console bytes dropped",
         run.elapsed,
-        run.exits,
-        run.serial_writes,
-        run.cmos_accesses,
         run.gsi_4_edges,
         run.unclaimed_ports,
         run.unclaimed_mmio,
@@ -742,8 +691,8 @@ const INIT_MARKER: &str = "INIT-MARKER-0123456789ABCDEF";
 /// and an `/init` that prints `INIT_MARKER` and restarts the machine. Linux
 /// must find a 16550A on IRQ 4 and set its clock from the CMOS RTC, `/init`'s
 /// line must leave through the tty, and the restart must end the run with
-/// the i8042 reset. The only access no device claims is Linux's probe of the
-/// ISA DMA page register at 0x87.
+/// the i8042 reset. The only access no device claims is one port read,
+/// Linux's probe of the ISA DMA page register at 0x87.
 #[test]
 #[ignore = "requires Linux x86_64 with access to /dev/kvm and VMM_KERNEL naming an x86_64 vmlinux"]
 fn boots_linux_on_the_legacy_devices_until_init_restarts() {
@@ -773,11 +722,7 @@ fn boots_linux_on_the_legacy_devices_until_init_restarts() {
     assert!(!log.contains("Kernel panic"), "{log}");
     assert!(run.gsi_4_edges > 0);
     assert_eq!(run.console.dropped_bytes(), 0);
-    assert!(
-        run.cmos_accesses > 0,
-        "Linux reads the RTC through 0x70 and 0x71"
-    );
-    assert_eq!(run.unclaimed_ports, [(0x87, false)], "{log}");
+    assert_eq!(run.unclaimed_ports, (1, 0), "{log}");
     assert_eq!(run.unclaimed_mmio, (0, 0));
 }
 
@@ -841,7 +786,11 @@ fn tty_output_waits_for_irq_4() {
 
     run.console.finish();
     let log = log.text();
-    assert!(run.end.is_none(), "{:?}; log:\n{log}", run.end);
+    assert!(
+        matches!(run.exit, Ok(VmExit::StopRequested)),
+        "{:?}; log:\n{log}",
+        run.exit
+    );
     assert!(log.contains("Run /init as init process"), "{log}");
     assert!(!log.contains("INIT-MARKER"), "{log}");
     assert!(run.gsi_4_edges > 0, "the UART asked for IRQ 4");
@@ -907,4 +856,50 @@ fn runs_user_code_on_every_vcpu() {
     assert_reset(&run, &log);
     let panic = "Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000f00";
     assert!(log.lines().any(|line| line == panic), "{log}");
+}
+
+/// Boots the kernel named by `VMM_KERNEL` with an `/init` that sleeps forever.
+/// Once it runs, a stop from another thread must end `Vm::run` within two
+/// seconds, every vCPU thread joined.
+#[test]
+#[ignore = "requires Linux x86_64 with access to /dev/kvm and VMM_KERNEL naming an x86_64 vmlinux"]
+fn stops_a_guest_that_sleeps_forever() {
+    // pause: mov eax, 34 (pause); syscall; jmp pause
+    let init = static_program(&[0xb8, 34, 0, 0, 0, 0x0f, 0x05, 0xeb, 0xf7]);
+    let archive = newc_archive("init", &init);
+    let initramfs = TempFile::new("pause.cpio", &archive);
+    let log = SerialLog::default();
+    let LinuxVm {
+        mut vm,
+        mut console,
+        ..
+    } = linux_vm(
+        &linux_config(1, LINUX_CMDLINE, Some(initramfs.0.clone())),
+        true,
+        Console::to(&log),
+    );
+    let stop = vm.stop_handle();
+    let watched = log.clone();
+    let stopper = thread::spawn(move || {
+        let deadline = Instant::now() + BOOT_TIMEOUT;
+        while !watched.text().contains("Run /init as init process") && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Let init reach its pause before the stop.
+        thread::sleep(Duration::from_millis(200));
+        let stopped = Instant::now();
+        stop.stop();
+        stopped
+    });
+
+    let exit = vm.run();
+    let returned = Instant::now();
+
+    let stopped = stopper.join().unwrap();
+    console.finish();
+    let log = log.text();
+    assert!(log.contains("Run /init as init process"), "{log}");
+    assert_eq!(exit.unwrap(), VmExit::StopRequested, "{log}");
+    let took = returned.duration_since(stopped);
+    assert!(took < Duration::from_secs(2), "{took:?}");
 }

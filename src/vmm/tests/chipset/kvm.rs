@@ -4,7 +4,7 @@
 //! A chipset built over a real KVM VM: a flat guest reads a claimed and an
 //! unclaimed port, and the device's line, armed by the build, reaches KVM.
 
-use super::{ChipsetBuilder, recorder};
+use super::{Access, ChipsetBuilder, recorder};
 use crate::{events::EventLoop, flat_guest::FlatGuest};
 
 /// Where the guest stores what it read.
@@ -55,7 +55,16 @@ fn a_flat_guest_reads_a_built_chipset() {
     assert_eq!(results, [0x42, 0xff], "the device's byte, then all ones");
     assert_eq!(
         *accesses.lock().unwrap(),
-        [(false, 0, vec![0]), (true, 1, vec![0xff])]
+        [
+            Access::Read {
+                offset: 0,
+                bytes: vec![0]
+            },
+            Access::Write {
+                offset: 1,
+                bytes: vec![0xff]
+            }
+        ]
     );
     assert_eq!(chipset.buses().pio.unclaimed(), (1, 0), "the read of 0x80");
 }

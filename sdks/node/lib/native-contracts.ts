@@ -224,11 +224,8 @@ export interface JsManagedVolumeSpec {
   /** Managed volume, by server-assigned id or by name — the server resolves either. */
   managedVolume: string;
   guestPath: string;
-  /**
-   * Read-only managed mounts are not implemented yet; `true` is rejected
-   * rather than silently downgraded to read-write.
-   */
-  readOnly?: false;
+  /** Mount the volume read-only. Default: false. */
+  readOnly?: boolean;
 }
 
 export interface JsHostPathVolumeSpec {
@@ -541,6 +538,14 @@ export interface JsSnapshotHandle {
 }
 
 export interface JsNetworkHandle {
+  updateInbound(spec: {
+    mode: "enabled" | "disabled";
+    allowNet?: string[];
+  }): Promise<void>;
+  updateOutbound(spec: {
+    mode: "enabled" | "disabled";
+    allowNet?: string[];
+  }): Promise<void>;
   /** Prepare a one-shot tunnel to a service port inside the box. */
   tunnel(port: number): Promise<NativeBoxTunnel>;
   /** Withdraw public access to a service port; open connections stay open. */
