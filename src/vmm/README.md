@@ -205,10 +205,10 @@ log so far.
   then reports CPU i, the log must show `exitcode=0x00000f00`.
 - With `console=ttyS0 panic=-1 reboot=k`, one vCPU and an `/init` that
   prints a line, waits for the tty to send it and restarts the machine, the
-  log must show the 16550A on IRQ 4, `rtc_cmos rtc_cmos: setting system
-  clock to 2026-01-02T03:04:05 UTC (1767323045)`, that line and
-  `reboot: Restarting system`, in that order. GSI 4 must have been raised,
-  no MMIO access may go unclaimed, and the only unclaimed port access must
+  log must show the 16550A on IRQ 4, `rtc_cmos rtc_cmos: registered as
+  rtc0`, that line and `reboot: Restarting system`, in that order, and must
+  not show `setting system clock`: kvm-clock keeps the boot time. GSI 4 must
+  have been raised, no MMIO access may go unclaimed, and the only unclaimed port access must
   be one read: Linux's probe of port `0x87`.
 - The same boot with a console sink that takes nothing until the run has
   ended, and a 4 KiB queue, must still end with `GuestReset`. The queue drops
@@ -401,8 +401,9 @@ windows, then adds the legacy devices:
 
 On x86_64, `devices::cmos::CmosRtc` is the PC's real-time clock. The guest
 writes a register number to port `0x70`, then reads or writes that register
-at `0x71`. Linux reads the date and time from it once at boot to set its
-system clock.
+at `0x71`. Linux registers it as `rtc0`, but takes its boot time from
+kvm-clock: `boot/kernel.config` leaves `RTC_HCTOSYS` off, so the CMOS, which
+reports whole seconds, never overrides it.
 
 - The time is an injected `Clock` plus an offset that keeps any time the
   guest sets. `cmos::host_clock` reads the host wall clock; the tests inject

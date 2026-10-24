@@ -724,11 +724,13 @@ fn boots_linux_on_the_legacy_devices_until_init_restarts() {
         &log,
         &[
             &serial_probe_line(),
-            "rtc_cmos rtc_cmos: setting system clock to 2026-01-02T03:04:05 UTC (1767323045)",
+            "rtc_cmos rtc_cmos: registered as rtc0",
             INIT_MARKER,
             "reboot: Restarting system",
         ],
     );
+    // The boot time comes from kvm-clock; the CMOS must not override it.
+    assert!(!log.contains("setting system clock"), "{log}");
     assert!(!log.contains("Kernel panic"), "{log}");
     assert!(run.gsi_4_edges > 0);
     assert_eq!(run.console.dropped_bytes(), 0);

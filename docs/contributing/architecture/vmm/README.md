@@ -485,7 +485,7 @@ from the new VMM.
 | Network | virtio-net to gvproxy in the shim (a stream socket with 4-byte length prefixes on Linux, datagrams with the `VFKT` handshake on macOS), with 192.168.127.2/24 set by the agent | unchanged; no TSI | M2 |
 | Console | virtio-console `hvc0` into `console.log`, truncated at each boot | unchanged; M1 first boots on the PL011 or 8250 | M1–M2 |
 | Other devices | virtio-rng, and virtio-balloon with free page reporting (`libkrun/src/devices/src/virtio/balloon/device.rs:28-30`) | unchanged | M2 |
-| Wall clock | PL031 (arm64) or CMOS (x86_64) at boot; on macOS, resync over vsock datagram port 123 | the same at boot; M2 chooses the resync mechanism | M1–M2 |
+| Wall clock | PL031 (arm64) or kvm-clock (x86_64) at boot; on macOS, resync over vsock datagram port 123 | the same at boot, with the CMOS RTC registered as `rtc0` on x86_64; M2 chooses the resync mechanism | M1–M2 |
 | End of the VM | the agent writes `exit.json`, syncs and calls `reboot(RESTART)`; libkrun then exits the process | the same guest steps; `run()` returns `GuestReset` | M2 |
 | Start failure | libkrun reports every error as `-EINVAL`, and the adapter probes the hypervisor for the cause | typed errors | M2 |
 

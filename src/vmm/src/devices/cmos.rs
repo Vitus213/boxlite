@@ -4,8 +4,9 @@
 //! The CMOS real-time clock (RTC) of a PC, at ports 0x70 and 0x71.
 //!
 //! The guest writes a register number to port 0x70, then reads or writes that
-//! register through port 0x71. Linux reads the date and time from it once at
-//! boot to set its system clock.
+//! register through port 0x71. Linux registers it as `rtc0`, but takes its
+//! boot time from kvm-clock: the guest kernel leaves `RTC_HCTOSYS` off, so
+//! this clock never overrides it.
 //!
 //! The time is an injected [`Clock`] plus an offset, so a time the guest
 //! writes stays set and keeps running. While the guest sets the time, the
