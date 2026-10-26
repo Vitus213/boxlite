@@ -52,7 +52,7 @@ pub(crate) fn add_legacy_devices(
     })?;
     builder.add("cmos", |r| {
         r.pio(CMOS, 2);
-        CmosRtc::new(clock, r.line(CMOS_GSI), r.event_sender())
+        Ok(CmosRtc::new(clock, r.line(CMOS_GSI), r.event_sender()))
     })?;
     builder.add("i8042", |r| {
         r.pio(I8042_DATA, 1);

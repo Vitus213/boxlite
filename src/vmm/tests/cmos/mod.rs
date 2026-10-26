@@ -12,10 +12,10 @@ use std::{
         atomic::{AtomicI64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use super::{AlarmFields, CmosRtc, host_clock};
+use super::{AlarmFields, Armed, CmosRtc, host_clock};
 use crate::{
     bus::{BusDevice, UNCLAIMED_READ},
     error::Result,
@@ -52,8 +52,7 @@ fn rtc_with_line(seconds: i64) -> (CmosRtc, Arc<AtomicI64>, Receiver<(u32, bool)
         Box::new(move || now.load(Ordering::SeqCst)),
         line,
         events.sender(),
-    )
-    .unwrap();
+    );
     (rtc, clock, changes)
 }
 
@@ -386,6 +385,30 @@ fn clearing_aie_disarms_the_alarm() {
         changes.recv_timeout(Duration::from_millis(1500)),
         Err(RecvTimeoutError::Timeout)
     );
+    assert_eq!(
+        read(&mut rtc, 0x0c),
+        0x20,
+        "AF without IRQF once AIE is off"
+    );
+}
+
+#[test]
+fn a_late_worker_coalesces_missed_matches_into_one() {
+    // An every-second alarm due at second 10 of the day, woken 3.5 s late.
+    let now = Instant::now();
+    let mut armed = Armed {
+        deadline: now - Duration::from_millis(3500),
+        second_of_day: 10,
+        fields: AlarmFields {
+            second: None,
+            minute: None,
+            hour: None,
+        },
+    };
+    armed.advance_past(now);
+    // Matches 11 to 13 are already past; the next one is still ahead.
+    assert_eq!(armed.second_of_day, 14);
+    assert_eq!(armed.deadline, now + Duration::from_millis(500));
 }
 
 #[test]

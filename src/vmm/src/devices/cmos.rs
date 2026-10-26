@@ -28,7 +28,7 @@ use std::{
 
 use crate::{
     bus::{BusDevice, UNCLAIMED_READ},
-    error::{Error, Result},
+    error::Error,
     events::{Event, EventSender},
     irq::IrqLine,
 };
@@ -121,35 +121,48 @@ pub(crate) struct CmosRtc {
     clock: Clock,
     /// The alarm the worker raises, and register C's flags.
     alarm: Arc<Alarm>,
+    /// The line and sender the worker takes when the guest first arms the
+    /// alarm; the chipset contract starts threads only after `build`.
+    idle_worker: Option<(IrqLine, EventSender)>,
     /// The thread that raises the alarm; `drop` stops and joins it.
     worker: Option<JoinHandle<()>>,
 }
 
 impl CmosRtc {
     /// An RTC on `clock` that raises its alarm on `irq`; a failed edge ends
-    /// the VM through `event_sender`.
-    pub(crate) fn new(clock: Clock, irq: IrqLine, event_sender: EventSender) -> Result<Self> {
+    /// the VM through `event_sender`. The alarm thread starts when the guest
+    /// first arms the alarm.
+    pub(crate) fn new(clock: Clock, irq: IrqLine, event_sender: EventSender) -> Self {
         let mut registers = [0; 128];
         registers[STATUS_A] = STATUS_A_AT_POWER_ON;
         registers[STATUS_B] = HOURS_24_MODE;
         registers[STATUS_D] = TIME_VALID;
-        let alarm = Arc::new(Alarm::default());
-        let worker = thread::Builder::new()
-            .name("cmos-alarm".into())
-            .spawn({
-                let alarm = Arc::clone(&alarm);
-                move || alarm.run(&irq, &event_sender)
-            })
-            .map_err(Error::SpawnRtcAlarm)?;
-        Ok(Self {
+        Self {
             selected: 0,
             registers,
             offset_from_clock: 0,
             century_written: false,
             clock,
-            alarm,
-            worker: Some(worker),
-        })
+            alarm: Arc::new(Alarm::default()),
+            idle_worker: Some((irq, event_sender)),
+            worker: None,
+        }
+    }
+
+    /// Starts the alarm thread once; a failed start ends the VM.
+    fn start_worker(&mut self) {
+        let Some((irq, event_sender)) = self.idle_worker.take() else {
+            return;
+        };
+        let alarm = Arc::clone(&self.alarm);
+        let failure = event_sender.clone();
+        match thread::Builder::new()
+            .name("cmos-alarm".into())
+            .spawn(move || alarm.run(&irq, &event_sender))
+        {
+            Ok(worker) => self.worker = Some(worker),
+            Err(source) => failure.send(Event::DeviceFailed(Error::SpawnRtcAlarm(source))),
+        }
     }
 
     /// Whether the time advances: set mode is off and the divider is not in reset.
@@ -205,7 +218,12 @@ impl CmosRtc {
         if register <= STATUS_B {
             // The time, an alarm field, the divider, SET or AIE may have
             // moved the next match.
-            self.alarm.set(self.next_alarm());
+            let armed = self.next_alarm();
+            if armed.is_some() {
+                self.start_worker();
+            }
+            let aie_off = self.registers[STATUS_B] & ALARM_INTERRUPT_ENABLE == 0;
+            self.alarm.set(armed, aie_off);
         }
     }
 
@@ -390,6 +408,18 @@ struct Armed {
     fields: AlarmFields,
 }
 
+impl Armed {
+    /// Moves to the first match whose deadline is after `now`, so a worker
+    /// that wakes late raises one interrupt for every match it missed.
+    fn advance_past(&mut self, now: Instant) {
+        while self.deadline <= now {
+            let ahead = self.fields.seconds_to_next_match(self.second_of_day);
+            self.deadline += Duration::from_secs(ahead.unsigned_abs());
+            self.second_of_day = (self.second_of_day + ahead).rem_euclid(SECONDS_PER_DAY);
+        }
+    }
+}
+
 /// The state the device and its alarm worker share.
 #[derive(Debug, Default)]
 struct AlarmState {
@@ -411,9 +441,15 @@ impl Alarm {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Arms the worker for `armed`, or disarms it.
-    fn set(&self, armed: Option<Armed>) {
-        self.state().armed = armed;
+    /// Arms the worker for `armed`, or disarms it. With AIE off, IRQF reads
+    /// clear, as IRQF is AF gated by AIE on the MC146818.
+    fn set(&self, armed: Option<Armed>, aie_off: bool) {
+        let mut state = self.state();
+        state.armed = armed;
+        if aie_off {
+            state.flags &= ALARM_FLAG;
+        }
+        drop(state);
         self.changed.notify_one();
     }
 
@@ -442,12 +478,10 @@ impl Alarm {
                     .0;
                 continue;
             }
-            state.flags = INTERRUPT_REQUEST | ALARM_FLAG;
             if let Some(armed) = &mut state.armed {
-                let ahead = armed.fields.seconds_to_next_match(armed.second_of_day);
-                armed.deadline += Duration::from_secs(ahead.unsigned_abs());
-                armed.second_of_day = (armed.second_of_day + ahead).rem_euclid(SECONDS_PER_DAY);
+                armed.advance_past(now);
             }
+            state.flags = INTERRUPT_REQUEST | ALARM_FLAG;
             drop(state);
             if let Err(error) = irq.pulse() {
                 event_sender.send(Event::DeviceFailed(error));
