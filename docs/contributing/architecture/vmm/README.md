@@ -303,7 +303,7 @@ On x86_64 the layout uses the values most surveyed VMMs share.
 | `0xE000_0000`–`0xF000_0000` | PCI ECAM, reserved for M9 | alioth |
 | `0xFEC0_0000`, `0xFEE0_0000` | IOAPIC and local APIC, both in the kernel on KVM; WHP (M10) emulates only the local APIC | architectural |
 | above RAM | hotplug memory (M7), then a 64-bit PCI BAR window (M9) | as on arm64 |
-| ports `0x3F8`, `0x70`–`0x71`, `0x60` and `0x64` | 8250 UART on GSI 4, CMOS RTC, i8042 | PC standard |
+| ports `0x3F8`, `0x70`–`0x71`, `0x60` and `0x64` | 8250 UART on GSI 4, CMOS RTC with its alarm on GSI 8, i8042 | PC standard |
 
 x86_64 guests boot without ACPI or a device tree, so the command line announces
 each virtio-mmio device (`virtio_mmio.device=4K@0xd0000000:5`), as libkrun does

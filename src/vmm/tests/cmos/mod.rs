@@ -2,27 +2,64 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The CMOS RTC on a clock the test moves: calendar encoding, the registers,
-//! and the time-setting sequences Linux uses. The 1999 and 2000 vectors are
-//! crosvm's (`devices/src/cmos.rs`); the others come from Python's datetime.
+//! the time-setting sequences Linux uses, and the alarm on its line. The 1999
+//! and 2000 vectors are crosvm's (`devices/src/cmos.rs`); the others come
+//! from Python's datetime.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicI64, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    },
+    time::Duration,
 };
 
-use super::{CmosRtc, host_clock};
-use crate::bus::{BusDevice, UNCLAIMED_READ};
+use super::{AlarmFields, CmosRtc, host_clock};
+use crate::{
+    bus::{BusDevice, UNCLAIMED_READ},
+    error::Result,
+    events::EventLoop,
+    irq::{IrqChip, IrqLine},
+};
 
 const NANOS: i64 = 1_000_000_000;
 
 /// The indexes of seconds, minutes, hours, weekday, day, month, year and century.
 const TIME: [u8; 8] = [0x00, 0x02, 0x04, 0x06, 0x07, 0x08, 0x09, 0x32];
 
-/// An RTC on a clock that starts at `seconds` past the epoch.
-fn rtc_at(seconds: i64) -> (CmosRtc, Arc<AtomicI64>) {
+/// Passes every level the RTC sets on its line to the test.
+struct Lines(Sender<(u32, bool)>);
+
+impl IrqChip for Lines {
+    fn set_line(&self, line: u32, level: bool) -> Result<()> {
+        // A test that stopped listening no longer cares.
+        let _ = self.0.send((line, level));
+        Ok(())
+    }
+}
+
+/// An RTC on a clock that starts at `seconds` past the epoch, and the levels
+/// it sets on its line 8. The line holds the only sender, so the receiver
+/// disconnects once the alarm worker has dropped it.
+fn rtc_with_line(seconds: i64) -> (CmosRtc, Arc<AtomicI64>, Receiver<(u32, bool)>) {
     let clock = Arc::new(AtomicI64::new(seconds * NANOS));
     let now = Arc::clone(&clock);
-    let rtc = CmosRtc::new(Box::new(move || now.load(Ordering::SeqCst)));
+    let (levels, changes) = mpsc::channel();
+    let line = IrqLine::new(Arc::new(Lines(levels)), 8);
+    let events = EventLoop::new().unwrap();
+    let rtc = CmosRtc::new(
+        Box::new(move || now.load(Ordering::SeqCst)),
+        line,
+        events.sender(),
+    )
+    .unwrap();
+    (rtc, clock, changes)
+}
+
+/// An RTC on a clock that starts at `seconds` past the epoch.
+fn rtc_at(seconds: i64) -> (CmosRtc, Arc<AtomicI64>) {
+    let (rtc, clock, _) = rtc_with_line(seconds);
     (rtc, clock)
 }
 
@@ -283,5 +320,85 @@ fn the_host_clock_counts_unix_nanoseconds() {
     assert!(
         (1_767_225_600..4_102_444_800).contains(&seconds),
         "{seconds}"
+    );
+}
+
+#[test]
+fn the_next_alarm_match_honours_wildcards_and_wraps_the_day() {
+    let at = |hour: i64, minute: i64, second: i64| hour * 3600 + minute * 60 + second;
+    let alarm = |second, minute, hour| AlarmFields {
+        second,
+        minute,
+        hour,
+    };
+    // Midnight from 23:59:59 is one second ahead, across the day.
+    let midnight = alarm(Some(0), Some(0), Some(0));
+    assert_eq!(midnight.seconds_to_next_match(at(23, 59, 59)), 1);
+    // Every field "don't care": every second.
+    assert_eq!(
+        alarm(None, None, None).seconds_to_next_match(at(12, 0, 0)),
+        1
+    );
+    // Second 30 of any minute, from 12:00:45.
+    let second_30 = alarm(Some(30), None, None);
+    assert_eq!(second_30.seconds_to_next_match(at(12, 0, 45)), 45);
+    // Any second of 13:00: next second while in it, the next day after it.
+    let at_13_00 = alarm(None, Some(0), Some(13));
+    assert_eq!(at_13_00.seconds_to_next_match(at(13, 0, 30)), 1);
+    assert_eq!(at_13_00.seconds_to_next_match(at(13, 0, 59)), 86_341);
+    // An alarm on the current second alone is a day away.
+    let now = alarm(Some(5), Some(4), Some(3));
+    assert_eq!(now.seconds_to_next_match(at(3, 4, 5)), 86_400);
+}
+
+#[test]
+fn an_alarm_raises_line_8_and_reports_itself_once_in_register_c() {
+    // 1999-12-31 23:59:59, with the alarm at 00:00:00, a second ahead.
+    let (mut rtc, _, changes) = rtc_with_line(946_684_799);
+    for index in [0x01, 0x03, 0x05] {
+        write(&mut rtc, index, 0x00);
+    }
+    write(&mut rtc, 0x0b, 0x22); // AIE, 24-hour mode
+
+    let wait = Duration::from_secs(5);
+    assert_eq!(changes.recv_timeout(wait), Ok((8, true)));
+    assert_eq!(changes.recv_timeout(wait), Ok((8, false)));
+    assert_eq!(read(&mut rtc, 0x0c), 0xa0, "IRQF and AF");
+    assert_eq!(read(&mut rtc, 0x0c), 0x00, "reading register C clears it");
+}
+
+#[test]
+fn clearing_aie_disarms_the_alarm() {
+    // Half a second into 00:00:00, with every alarm field "don't care".
+    let (mut rtc, clock, changes) = rtc_with_line(0);
+    advance(&clock, NANOS / 2);
+    for index in [0x01, 0x03, 0x05] {
+        write(&mut rtc, index, 0xff);
+    }
+    write(&mut rtc, 0x0b, 0x22);
+    let wait = Duration::from_secs(5);
+    assert_eq!(changes.recv_timeout(wait), Ok((8, true)));
+    assert_eq!(changes.recv_timeout(wait), Ok((8, false)));
+
+    write(&mut rtc, 0x0b, 0x02);
+    // Still armed, the alarm would fire again one second after the first.
+    assert_eq!(
+        changes.recv_timeout(Duration::from_millis(1500)),
+        Err(RecvTimeoutError::Timeout)
+    );
+}
+
+#[test]
+fn dropping_the_rtc_stops_and_joins_its_alarm_worker() {
+    // At 00:00:00 the zeroed alarm registers match only now: a day away.
+    let (mut rtc, _, changes) = rtc_with_line(0);
+    write(&mut rtc, 0x0b, 0x22);
+
+    drop(rtc);
+    // The worker held the line's only sender, so the channel disconnects once
+    // it has returned; a worker still waiting for its alarm keeps it open.
+    assert_eq!(
+        changes.recv_timeout(Duration::from_secs(5)),
+        Err(RecvTimeoutError::Disconnected)
     );
 }

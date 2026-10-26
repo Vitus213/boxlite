@@ -204,6 +204,7 @@ fn a_second_platform_conflicts_with_every_legacy_claim() {
             "com1 claims port range 0x3f8+0x8, held by com1",
             "com1 claims interrupt line 4, held by com1",
             "cmos claims port range 0x70+0x2, held by cmos",
+            "cmos claims interrupt line 8, held by cmos",
             "i8042 claims port range 0x60+0x1, held by i8042",
             "i8042 claims port range 0x64+0x1, held by i8042",
         ]

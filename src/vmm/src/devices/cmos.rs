@@ -14,12 +14,24 @@
 //! it starts half a second into the written second, because Linux writes the
 //! time half a second early (`set_offset_nsec` in `rtc-cmos.c`).
 //!
-//! Not modelled: 12-hour mode, and IRQ 8, so alarm, update and periodic
-//! interrupts never fire.
+//! The alarm follows the alarm registers and AIE: at each matching guest
+//! second a worker thread sets IRQF and AF in register C and raises an edge
+//! on GSI 8. Linux emulates update interrupts with that alarm, and `hwclock`
+//! waits on them. Not modelled: 12-hour mode, day and month alarms, and
+//! periodic and update-ended interrupts.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
-use crate::bus::{BusDevice, UNCLAIMED_READ};
+use crate::{
+    bus::{BusDevice, UNCLAIMED_READ},
+    error::{Error, Result},
+    events::{Event, EventSender},
+    irq::IrqLine,
+};
 
 /// The clock the RTC follows, in nanoseconds since the Unix epoch.
 pub(crate) type Clock = Box<dyn Fn() -> i64 + Send>;
@@ -75,6 +87,18 @@ const BINARY_MODE: u8 = 0x04;
 const HOURS_24_MODE: u8 = 0x02;
 /// Status D: the RAM and the time are valid.
 const TIME_VALID: u8 = 0x80;
+// The alarm registers, each matched against the time register before it.
+const SECONDS_ALARM: usize = 0x01;
+const MINUTES_ALARM: usize = 0x03;
+const HOURS_ALARM: usize = 0x05;
+/// An alarm byte at or above this matches any value ("don't care").
+const ALARM_ANY: u8 = 0xc0;
+/// Status B: an alarm match raises IRQ 8.
+const ALARM_INTERRUPT_ENABLE: u8 = 0x20;
+/// Status C: an enabled interrupt is pending, here always the alarm.
+const INTERRUPT_REQUEST: u8 = 0x80;
+/// Status C: the time matched the alarm.
+const ALARM_FLAG: u8 = 0x20;
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -95,21 +119,37 @@ pub(crate) struct CmosRtc {
     /// Whether the guest wrote the century byte, which then sets the century.
     century_written: bool,
     clock: Clock,
+    /// The alarm the worker raises, and register C's flags.
+    alarm: Arc<Alarm>,
+    /// The thread that raises the alarm; `drop` stops and joins it.
+    worker: Option<JoinHandle<()>>,
 }
 
 impl CmosRtc {
-    pub(crate) fn new(clock: Clock) -> Self {
+    /// An RTC on `clock` that raises its alarm on `irq`; a failed edge ends
+    /// the VM through `event_sender`.
+    pub(crate) fn new(clock: Clock, irq: IrqLine, event_sender: EventSender) -> Result<Self> {
         let mut registers = [0; 128];
         registers[STATUS_A] = STATUS_A_AT_POWER_ON;
         registers[STATUS_B] = HOURS_24_MODE;
         registers[STATUS_D] = TIME_VALID;
-        Self {
+        let alarm = Arc::new(Alarm::default());
+        let worker = thread::Builder::new()
+            .name("cmos-alarm".into())
+            .spawn({
+                let alarm = Arc::clone(&alarm);
+                move || alarm.run(&irq, &event_sender)
+            })
+            .map_err(Error::SpawnRtcAlarm)?;
+        Ok(Self {
             selected: 0,
             registers,
             offset_from_clock: 0,
             century_written: false,
             clock,
-        }
+            alarm,
+            worker: Some(worker),
+        })
     }
 
     /// Whether the time advances: set mode is off and the divider is not in reset.
@@ -128,7 +168,8 @@ impl CmosRtc {
                 self.time_register(register, self.guest_time_nanos())
             }
             STATUS_A => self.registers[STATUS_A] & !UPDATE_IN_PROGRESS,
-            STATUS_C => 0,
+            // Reading register C clears it.
+            STATUS_C => std::mem::take(&mut self.alarm.state().flags),
             _ => self.registers[register],
         }
     }
@@ -160,6 +201,11 @@ impl CmosRtc {
             // whether it restarts the clock through set mode or the divider.
             (false, true) => self.restart_from_registers(NANOS_PER_SECOND / 2),
             _ => {}
+        }
+        if register <= STATUS_B {
+            // The time, an alarm field, the divider, SET or AIE may have
+            // moved the next match.
+            self.alarm.set(self.next_alarm());
         }
     }
 
@@ -249,6 +295,35 @@ impl CmosRtc {
         let (tens, ones) = (raw >> 4, raw & 0x0f);
         (tens <= 9 && ones <= 9).then(|| i64::from(tens * 10 + ones))
     }
+
+    /// The next guest second the alarm matches, as a host deadline, or
+    /// `None` while AIE is off, the clock is stopped, or an alarm byte is not
+    /// a valid second, minute or hour.
+    fn next_alarm(&self) -> Option<Armed> {
+        if self.registers[STATUS_B] & ALARM_INTERRUPT_ENABLE == 0 || !self.clock_running() {
+            return None;
+        }
+        let field = |register: usize, limit: i64| match self.registers[register] {
+            raw if raw >= ALARM_ANY => Some(None),
+            raw => self.decode(raw).filter(|value| *value < limit).map(Some),
+        };
+        let fields = AlarmFields {
+            second: field(SECONDS_ALARM, 60)?,
+            minute: field(MINUTES_ALARM, 60)?,
+            hour: field(HOURS_ALARM, 24)?,
+        };
+        let now = self.guest_time_nanos();
+        let second_of_day = now.div_euclid(NANOS_PER_SECOND).rem_euclid(SECONDS_PER_DAY);
+        let ahead = fields.seconds_to_next_match(second_of_day);
+        // At least a second ahead, so the subtraction cannot underflow.
+        let wait = Duration::from_secs(ahead.unsigned_abs())
+            - Duration::from_nanos(now.rem_euclid(NANOS_PER_SECOND).unsigned_abs());
+        Some(Armed {
+            deadline: Instant::now() + wait,
+            second_of_day: (second_of_day + ahead).rem_euclid(SECONDS_PER_DAY),
+            fields,
+        })
+    }
 }
 
 impl BusDevice for CmosRtc {
@@ -266,6 +341,119 @@ impl BusDevice for CmosRtc {
             (0, [value]) => self.selected = usize::from(value & 0x7f),
             (1, [value]) => self.write_register(self.selected, *value),
             _ => {}
+        }
+    }
+}
+
+impl Drop for CmosRtc {
+    fn drop(&mut self) {
+        self.alarm.state().stopping = true;
+        self.alarm.changed.notify_one();
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            tracing::warn!("the CMOS RTC alarm thread panicked");
+        }
+    }
+}
+
+/// The alarm's second, minute and hour; `None` matches any value.
+#[derive(Clone, Copy, Debug)]
+struct AlarmFields {
+    second: Option<i64>,
+    minute: Option<i64>,
+    hour: Option<i64>,
+}
+
+impl AlarmFields {
+    /// Seconds from `second_of_day` to the next second the alarm matches,
+    /// 1 to 86 400; an alarm that matches only `second_of_day` is a day away.
+    fn seconds_to_next_match(self, second_of_day: i64) -> i64 {
+        (1..SECONDS_PER_DAY)
+            .find(|ahead| self.matches((second_of_day + ahead).rem_euclid(SECONDS_PER_DAY)))
+            .unwrap_or(SECONDS_PER_DAY)
+    }
+
+    fn matches(self, second_of_day: i64) -> bool {
+        let matches = |field: Option<i64>, value: i64| field.is_none_or(|field| field == value);
+        matches(self.second, second_of_day % 60)
+            && matches(self.minute, second_of_day / 60 % 60)
+            && matches(self.hour, second_of_day / 3600)
+    }
+}
+
+/// An armed alarm: the host deadline of the guest second it matches next.
+#[derive(Debug)]
+struct Armed {
+    deadline: Instant,
+    second_of_day: i64,
+    fields: AlarmFields,
+}
+
+/// The state the device and its alarm worker share.
+#[derive(Debug, Default)]
+struct AlarmState {
+    armed: Option<Armed>,
+    /// Register C: IRQF and AF once the alarm matched, until the guest reads it.
+    flags: u8,
+    stopping: bool,
+}
+
+#[derive(Debug, Default)]
+struct Alarm {
+    state: Mutex<AlarmState>,
+    /// Wakes the worker when the alarm is re-armed, disarmed or stopped.
+    changed: Condvar,
+}
+
+impl Alarm {
+    fn state(&self) -> MutexGuard<'_, AlarmState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Arms the worker for `armed`, or disarms it.
+    fn set(&self, armed: Option<Armed>) {
+        self.state().armed = armed;
+        self.changed.notify_one();
+    }
+
+    /// The worker: at each deadline, sets register C, re-arms for the next
+    /// match, and raises an edge on `irq` outside the lock, until the device
+    /// stops it. A failed edge ends the VM.
+    fn run(&self, irq: &IrqLine, event_sender: &EventSender) {
+        let mut state = self.state();
+        loop {
+            if state.stopping {
+                return;
+            }
+            let Some(deadline) = state.armed.as_ref().map(|armed| armed.deadline) else {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            };
+            let now = Instant::now();
+            if now < deadline {
+                state = self
+                    .changed
+                    .wait_timeout(state, deadline - now)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+                continue;
+            }
+            state.flags = INTERRUPT_REQUEST | ALARM_FLAG;
+            if let Some(armed) = &mut state.armed {
+                let ahead = armed.fields.seconds_to_next_match(armed.second_of_day);
+                armed.deadline += Duration::from_secs(ahead.unsigned_abs());
+                armed.second_of_day = (armed.second_of_day + ahead).rem_euclid(SECONDS_PER_DAY);
+            }
+            drop(state);
+            if let Err(error) = irq.pulse() {
+                event_sender.send(Event::DeviceFailed(error));
+                return;
+            }
+            state = self.state();
         }
     }
 }

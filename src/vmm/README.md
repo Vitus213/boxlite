@@ -182,8 +182,8 @@ make test:integration:vmm:linux
 ```
 
 Each builds a KVM `Vm` with `prepare` for 256 MiB of RAM on the
-[legacy devices](#legacy-devices-and-the-console), with the CMOS RTC stopped
-at 2026-01-02T03:04:05Z, and runs it with `Vm::run`. The host VM is KVM behind a test wrapper that counts the edges
+[legacy devices](#legacy-devices-and-the-console), with the CMOS RTC running
+from 2026-01-02T03:04:05Z, and runs it with `Vm::run`. The host VM is KVM behind a test wrapper that counts the edges
 devices raise on GSI 4 and can drop every interrupt. A watchdog stops a boot
 at its timeout, 30 seconds unless stated, so a failed boot reports the serial
 log so far.
@@ -210,6 +210,12 @@ log so far.
   not show `setting system clock`: kvm-clock keeps the boot time. GSI 4 must
   have been raised, no MMIO access may go unclaimed, and the only unclaimed port access must
   be one read: Linux's probe of port `0x87`.
+- With `console=ttyS0 panic=-1 reboot=k`, one vCPU and an `/init` that
+  mounts devtmpfs, turns on update interrupts on `/dev/rtc0` with
+  `RTC_UIE_ON`, as `hwclock` does, and waits up to 2 s for one, the log must
+  show `rtc0` registered, the line `/init` prints once one arrives, and
+  `reboot: Restarting system`, with no panic. Linux serves update
+  interrupts with the CMOS alarm, so the line proves the alarm raised IRQ 8.
 - The same boot with a console sink that takes nothing until the run has
   ended, and a 4 KiB queue, must still end with `GuestReset`. The queue drops
   the oldest bytes and counts them; the sink then gets the batch the worker
@@ -407,7 +413,7 @@ reports whole seconds, never overrides it.
 
 - The time is an injected `Clock` plus an offset that keeps any time the
   guest sets. `cmos::host_clock` reads the host wall clock; the tests inject
-  a fixed time.
+  a fixed or a running time.
 - As in QEMU, the time registers hold still while register B's SET bit or a
   divider reset in register A stops the clock.
 - On any release the written time resumes half a second into its second,
@@ -419,12 +425,26 @@ reports whole seconds, never overrides it.
 - Time registers read in BCD unless register B selects binary. Only 24-hour
   mode is modelled, so register B always reads with that bit set.
 - Register A starts at `0x26` and never reports an update in progress;
-  register C reads 0 and register D reads `0x80`. The remaining bytes are
-  NVRAM.
+  register D reads `0x80`. The remaining bytes are NVRAM.
 - Linux writes the century byte only through ACPI, so a two-digit year
   00–69 means 20xx and 70–99 means 19xx unless the guest writes it.
-- There is no IRQ 8, so alarm, update and periodic interrupts never fire:
-  `hwclock` in the guest waits 10 s for an update interrupt and fails.
+- The alarm matches the seconds, minutes and hours registers `0x01`, `0x03`
+  and `0x05`; a byte `0xC0`–`0xFF` matches any value, as Linux writes `0xff`
+  for a field it does not care about. With AIE in register B set and the
+  clock running, a worker thread sleeps until the next matching guest second,
+  sets IRQF and AF in register C, raises an edge on GSI 8 and re-arms.
+  Reading register C returns and clears them. Any write to a time, alarm or
+  status register recomputes the deadline; clearing AIE or stopping the
+  clock disarms it.
+- x86 Linux registers `rtc_cmos` with IRQ 8, so it trusts the alarm and
+  serves update interrupts with it; `hwclock` waits up to 10 s for one on
+  every read. Periodic and update-ended interrupts, and day and month
+  alarms, are not modelled.
+- The worker holds the alarm state and the line, never the device.
+  Dropping the `CmosRtc`, which the `Chipset` owns and drops before the host
+  VM, stops and joins it; a failed edge ends the VM with `DeviceFailed`.
+- `boot/kernel.config` enables `RTC_INTF_DEV`, so the guest has
+  `/dev/rtc0`.
 
 ## Build
 

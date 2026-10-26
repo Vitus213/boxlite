@@ -16,17 +16,19 @@ use crate::{
 };
 
 // COM1 and the interrupt line (GSI) it raises, the CMOS index port, whose
-// data port follows it, then the i8042 data and command ports.
+// data port follows it, and the CMOS alarm's line, then the i8042 data and
+// command ports.
 pub(crate) const COM1: u64 = 0x3f8;
 pub(crate) const COM1_GSI: u32 = 4;
 pub(crate) const CMOS: u64 = 0x70;
+pub(crate) const CMOS_GSI: u32 = 8;
 pub(crate) const I8042_DATA: u64 = 0x60;
 pub(crate) const I8042_COMMAND: u64 = 0x64;
 
 /// Reserves the windows the host serves in the kernel, so a device placed
 /// there fails the build, then adds COM1 on GSI 4, writing to `console`, the
-/// CMOS RTC, which reads the time from `clock`, and the i8042, whose reset
-/// ends the VM.
+/// CMOS RTC, which reads the time from `clock` and raises its alarm on GSI 8,
+/// and the i8042, whose reset ends the VM.
 pub(crate) fn add_legacy_devices(
     builder: &mut ChipsetBuilder,
     console: ConsoleWriter,
@@ -50,7 +52,7 @@ pub(crate) fn add_legacy_devices(
     })?;
     builder.add("cmos", |r| {
         r.pio(CMOS, 2);
-        Ok(CmosRtc::new(clock))
+        CmosRtc::new(clock, r.line(CMOS_GSI), r.event_sender())
     })?;
     builder.add("i8042", |r| {
         r.pio(I8042_DATA, 1);
