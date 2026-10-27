@@ -722,6 +722,52 @@ mod tests {
         );
     }
 
+    /// A cached "yes" would let later execs reach a server that has since
+    /// dropped the flag, where they would run as the box default user (#2116),
+    /// so the gate must re-read the live endpoint before every user exec.
+    #[tokio::test]
+    async fn exec_user_gate_rechecks_uncached_server_config() {
+        const EXEC_RESPONSE: &str = r#"{"execution_id":"exec-1"}"#;
+        let (port, server) = exchange_server(vec![
+            (200, BOX_RESPONSE),
+            (200, r#"{"capabilities":{"exec_user_enabled":true}}"#),
+            (201, EXEC_RESPONSE),
+            (200, r#"{"capabilities":{}}"#),
+        ])
+        .await;
+        let runtime =
+            RestRuntime::new(&BoxliteRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let sandbox = RuntimeBackend::get(&runtime, "named")
+            .await
+            .unwrap()
+            .unwrap();
+
+        sandbox
+            .exec(crate::BoxCommand::new("id").user("1000:1000"))
+            .await
+            .expect("first exec with advertised capability");
+        let second = sandbox
+            .exec(crate::BoxCommand::new("id").user("1000:1000"))
+            .await;
+
+        assert!(matches!(second, Err(BoxliteError::Unsupported(_))));
+        let requests: Vec<String> = server
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect();
+        assert_eq!(
+            requests,
+            [
+                "GET /v1/boxes/named HTTP/1.1",
+                "GET /v1/config HTTP/1.1",
+                "POST /v1/boxes/01HJK4TNRPQSXYZ8WM6NCVT9R5/exec HTTP/1.1",
+                "GET /v1/config HTTP/1.1",
+            ]
+        );
+    }
+
     /// The exec body carries `user` exactly when the command sets one, and
     /// only a command with a user probes the server's capabilities.
     #[tokio::test]
