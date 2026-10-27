@@ -773,7 +773,8 @@ mod tests {
     #[tokio::test]
     async fn exec_request_body_carries_user_only_when_set() {
         const EXEC_RESPONSE: &str = r#"{"execution_id":"exec-1"}"#;
-        let cases: [(Option<&str>, &[(u16, &'static str)]); 2] = [
+        type ExecUserCase = (Option<&'static str>, &'static [(u16, &'static str)]);
+        let cases: [ExecUserCase; 2] = [
             (None, &[(200, BOX_RESPONSE), (201, EXEC_RESPONSE)]),
             (
                 Some("1000:1000"),
