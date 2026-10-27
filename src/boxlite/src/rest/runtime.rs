@@ -722,6 +722,29 @@ mod tests {
         );
     }
 
+    /// A config without a capabilities object advertises nothing at all; the
+    /// gate must refuse rather than assume support.
+    #[tokio::test]
+    async fn exec_user_requires_capabilities_object() {
+        let (port, server) = json_server(vec![BOX_RESPONSE, "{}"]).await;
+        let runtime =
+            RestRuntime::new(&BoxliteRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let sandbox = RuntimeBackend::get(&runtime, "named")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = sandbox
+            .exec(crate::BoxCommand::new("id").user("1000:1000"))
+            .await;
+
+        assert!(matches!(result, Err(BoxliteError::Unsupported(_))));
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /v1/boxes/named HTTP/1.1", "GET /v1/config HTTP/1.1"]
+        );
+    }
+
     /// A cached "yes" would let later execs reach a server that has since
     /// dropped the flag, where they would run as the box default user (#2116),
     /// so the gate must re-read the live endpoint before every user exec.

@@ -16,3 +16,15 @@ pub(in crate::commands::serve) async fn get_config() -> Json<ServerConfig> {
         },
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The client gates per-exec `user` on this flag (#2116): a serve that
+    /// supports the field must advertise it, or clients refuse to send users.
+    #[tokio::test]
+    async fn config_advertises_exec_user() {
+        assert!(get_config().await.0.capabilities.exec_user_enabled);
+    }
+}

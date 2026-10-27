@@ -482,6 +482,50 @@ async fn spawn_execution(
     })
 }
 
+/// Classify a failed spawn for the host: an unknown exec user or group is
+/// the caller's mistake (#2116), so it keeps the invalid_argument class and
+/// surfaces as InvalidArgument/400 instead of an internal fault. Everything
+/// else stays a spawn failure.
+fn spawn_failure_response(
+    execution_id: &str,
+    e: boxlite_shared::errors::BoxliteError,
+) -> ExecResponse {
+    match e {
+        boxlite_shared::errors::BoxliteError::InvalidArgument(detail) => {
+            error_response(execution_id.to_string(), "invalid_argument", &detail)
+        }
+        e => spawn_error(execution_id, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod spawn_failure_tests {
+    use super::*;
+
+    /// The exec-user contract (#2116): an unknown user or group reaches the
+    /// host as invalid_argument (→ 400), other spawn faults stay spawn_failed.
+    #[test]
+    fn spawn_failure_keeps_invalid_argument_class() {
+        let response = spawn_failure_response(
+            "exec-1",
+            boxlite_shared::errors::BoxliteError::InvalidArgument("User 'x' not found".into()),
+        );
+        assert_eq!(
+            response.error.as_ref().expect("error").reason,
+            "invalid_argument"
+        );
+
+        let response = spawn_failure_response(
+            "exec-1",
+            boxlite_shared::errors::BoxliteError::Internal("boom".into()),
+        );
+        assert_eq!(
+            response.error.as_ref().expect("error").reason,
+            "spawn_failed"
+        );
+    }
+}
+
 fn error_response(id: String, reason: &str, detail: &str) -> ExecResponse {
     ExecResponse {
         execution_id: id,
@@ -661,18 +705,7 @@ async fn spawn_with_executor(
                                 }
                                 return Err(spawn_error(execution_id, msg));
                             }
-                            // An unknown user or group is the caller's mistake; keep its class
-                            // so the host reports InvalidArgument rather than an internal fault.
-                            return Err(match e {
-                                boxlite_shared::errors::BoxliteError::InvalidArgument(detail) => {
-                                    error_response(
-                                        execution_id.to_string(),
-                                        "invalid_argument",
-                                        &detail,
-                                    )
-                                }
-                                e => spawn_error(execution_id, e.to_string()),
-                            });
+                            return Err(spawn_failure_response(execution_id, e));
                         }
                     }
                 }

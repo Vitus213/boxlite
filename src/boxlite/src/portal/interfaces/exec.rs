@@ -62,10 +62,7 @@ impl ExecutionInterface {
         // Start execution
         let exec_response = self.client.exec(request).await?.into_inner();
         if let Some(err) = exec_response.error {
-            return Err(match err.reason.as_str() {
-                "invalid_argument" => BoxliteError::InvalidArgument(err.detail),
-                _ => BoxliteError::Internal(format!("{}: {}", err.reason, err.detail)),
-            });
+            return Err(map_exec_error(&err.reason, err.detail));
         }
 
         let execution_id = exec_response.execution_id.clone();
@@ -867,6 +864,16 @@ impl OutputTracker {
     }
 }
 
+/// Map a guest exec error to its client-visible class: an unknown exec user
+/// or group is the caller's mistake (#2116) and must surface as
+/// InvalidArgument rather than an internal fault.
+fn map_exec_error(reason: &str, detail: String) -> BoxliteError {
+    match reason {
+        "invalid_argument" => BoxliteError::InvalidArgument(detail),
+        _ => BoxliteError::Internal(format!("{}: {}", reason, detail)),
+    }
+}
+
 // ============================================================================
 // UNIT TESTS
 // ============================================================================
@@ -875,6 +882,20 @@ impl OutputTracker {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// An unknown exec user or group is the caller's mistake (#2116) and
+    /// must reach clients as InvalidArgument, not an internal fault.
+    #[test]
+    fn exec_error_reason_maps_to_client_class() {
+        assert!(matches!(
+            map_exec_error("invalid_argument", "User 'x' not found".into()),
+            BoxliteError::InvalidArgument(_)
+        ));
+        assert!(matches!(
+            map_exec_error("spawn_failed", "boom".into()),
+            BoxliteError::Internal(_)
+        ));
+    }
 
     /// Test that CancellationToken correctly signals cancelled state.
     #[tokio::test]
