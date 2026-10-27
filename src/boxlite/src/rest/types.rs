@@ -95,6 +95,7 @@ pub(crate) struct ServerCapabilities {
     pub export_enabled: Option<bool>,
     pub import_enabled: Option<bool>,
     pub private_tunnels_enabled: Option<bool>,
+    pub exec_user_enabled: Option<bool>,
 }
 
 // ============================================================================
@@ -830,6 +831,8 @@ pub(crate) struct ExecRequest {
     pub working_dir: Option<String>,
     #[serde(default)]
     pub tty: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 impl ExecRequest {
@@ -847,6 +850,7 @@ impl ExecRequest {
             timeout_seconds,
             working_dir: cmd.working_dir.clone(),
             tty: cmd.tty,
+            user: cmd.user.clone(),
         }
     }
 }
@@ -1525,6 +1529,7 @@ mod tests {
             timeout_seconds: Some(30.0),
             working_dir: Some("/app".to_string()),
             tty: false,
+            user: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"command\":\"python3\""));

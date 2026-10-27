@@ -1299,6 +1299,9 @@ fn build_box_command(req: &ExecRequest) -> Result<BoxCommand, boxlite::BoxliteEr
     if req.tty {
         cmd = cmd.tty(true);
     }
+    if let Some(user) = &req.user {
+        cmd = cmd.user(user);
+    }
     if let Some(secs) = req.timeout_seconds {
         cmd = cmd.timeout_seconds(secs)?;
     }
@@ -2098,6 +2101,7 @@ mod tests {
                 timeout_seconds: Some(seconds),
                 working_dir: None,
                 tty: false,
+                user: None,
             };
 
             let err = build_box_command(&req).expect_err("invalid timeout should fail");

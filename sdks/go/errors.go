@@ -69,6 +69,12 @@ func IsInvalidState(err error) bool {
 	return errors.As(err, &e) && e.Code == ErrInvalidState
 }
 
+// IsInvalidArgument reports whether err indicates the caller passed a value the runtime refuses.
+func IsInvalidArgument(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Code == ErrInvalidArgument
+}
+
 // IsStopped reports whether err indicates a stopped or shut down resource.
 func IsStopped(err error) bool {
 	var e *Error

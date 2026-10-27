@@ -21,6 +21,7 @@ type ExecRequest struct {
 	TimeoutSeconds *float64          `json:"timeout_seconds"`
 	WorkingDir     *string           `json:"working_dir"`
 	TTY            bool              `json:"tty"`
+	User           string            `json:"user"`
 }
 
 type ExecResponse struct {
@@ -62,6 +63,7 @@ func BoxliteExec(ctx *gin.Context) {
 		Args:    req.Args,
 		Env:     req.Env,
 		TTY:     req.TTY,
+		User:    req.User,
 	}
 	if req.WorkingDir != nil {
 		startOpts.WorkingDir = *req.WorkingDir
@@ -86,6 +88,11 @@ func BoxliteExec(ctx *gin.Context) {
 		// execs right now).
 		if sdkboxlite.IsStopped(err) || sdkboxlite.IsInvalidState(err) {
 			ctx.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("exec failed: %s", err)})
+			return
+		}
+		// An unknown user or group is the caller's mistake, not a runner fault.
+		if sdkboxlite.IsInvalidArgument(err) {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("exec failed: %s", err)})
 			return
 		}
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("exec failed: %s", err)})

@@ -661,7 +661,18 @@ async fn spawn_with_executor(
                                 }
                                 return Err(spawn_error(execution_id, msg));
                             }
-                            return Err(spawn_error(execution_id, e.to_string()));
+                            // An unknown user or group is the caller's mistake; keep its class
+                            // so the host reports InvalidArgument rather than an internal fault.
+                            return Err(match e {
+                                boxlite_shared::errors::BoxliteError::InvalidArgument(detail) => {
+                                    error_response(
+                                        execution_id.to_string(),
+                                        "invalid_argument",
+                                        &detail,
+                                    )
+                                }
+                                e => spawn_error(execution_id, e.to_string()),
+                            });
                         }
                     }
                 }

@@ -184,6 +184,9 @@ impl BoxBackend for RestBox {
 
     async fn exec(&self, command: BoxCommand) -> BoxliteResult<Execution> {
         let box_id = self.box_id_str();
+        if command.user.is_some() {
+            self.client.require_exec_user_enabled().await?;
+        }
 
         // 1. Create execution on remote server
         let path = format!("/boxes/{}/exec", box_id);

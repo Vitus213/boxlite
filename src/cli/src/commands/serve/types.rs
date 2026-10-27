@@ -316,6 +316,8 @@ pub(super) struct ExecRequest {
     pub working_dir: Option<String>,
     #[serde(default)]
     pub tty: bool,
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -353,6 +355,7 @@ pub(super) struct ServerCapabilities {
     pub clone_enabled: bool,
     pub export_enabled: bool,
     pub import_enabled: bool,
+    pub exec_user_enabled: bool,
 }
 
 // ============================================================================

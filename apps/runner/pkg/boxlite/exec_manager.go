@@ -343,6 +343,7 @@ type StartOptions struct {
 	WorkingDir string
 	Timeout    time.Duration
 	TTY        bool
+	User       string
 }
 
 func (m *ExecManager) Start(ctx context.Context, bx *boxlite.Box, boxID string, opts StartOptions) (string, error) {
@@ -375,6 +376,7 @@ func (m *ExecManager) Start(ctx context.Context, bx *boxlite.Box, boxID string, 
 		Stderr:     exec.stderrBus,
 		Env:        opts.Env,
 		WorkingDir: opts.WorkingDir,
+		User:       opts.User,
 		Timeout:    opts.Timeout,
 	})
 	if err != nil {

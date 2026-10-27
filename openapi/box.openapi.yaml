@@ -1937,6 +1937,10 @@ components:
               type: boolean
               description: Whether prepareTunnel honors a private `isPublic` of false; clients check it before every private prepare
               example: true
+            exec_user_enabled:
+              type: boolean
+              description: Server honors `ExecRequest.user`.
+              example: true
             idempotency_key_lifetime:
               type: string
               description: How long idempotency keys are retained (ISO 8601 duration)
@@ -2755,6 +2759,12 @@ components:
           type: boolean
           default: false
           description: Enable pseudo-terminal allocation
+        user:
+          type: string
+          description: >-
+            User to run the command as, Docker format `<name|uid>[:<group|gid>]`.
+            Absent or empty uses the box default user. Unknown users or groups return 400.
+          example: "1000:1000"
 
     ExecResponse:
       type: object

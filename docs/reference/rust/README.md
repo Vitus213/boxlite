@@ -604,6 +604,12 @@ let cmd = BoxCommand::new("python3")
 | `user` | `fn user(self, user: impl Into<String>) -> Self` | Set execution user (e.g., `"nobody"`, `"1000:1000"`) |
 | `tty` | `fn tty(self, enable: bool) -> Self` | Enable pseudo-terminal |
 
+An unknown user or group fails the exec with `BoxliteError::InvalidArgument`
+(HTTP 400 over REST) and the command does not run. Over REST, a command with a
+`user` first re-reads `exec_user_enabled` from `GET /v1/config` (uncached); a
+server that does not advertise it gets `BoxliteError::Unsupported` and no exec
+request, because it would otherwise run the command as the box default user.
+
 ### Execution
 
 Handle to a running command.

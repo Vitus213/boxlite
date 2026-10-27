@@ -163,19 +163,12 @@ async def test_empty_command_output(box):
 
 @pytest.mark.asyncio
 async def test_exec_as_nobody(box):
-    """Exec with user='nobody' should run as a non-root uid.
-
-    Note: the user= parameter may not be supported over REST on all
-    runner versions — xfail until confirmed."""
-    ex = await box.exec("id", ["-u"], user="nobody")
+    """Exec with user='nobody' runs as nobody over REST (#2116)."""
+    ex = await box.exec("sh", ["-c", "echo $(id -u):$(id -g)"], user="nobody")
     out, _ = await drain(ex)
     rc = await asyncio.wait_for(ex.wait(), timeout=30)
     assert rc.exit_code == 0
-    uid = out.strip()
-    # Some runner versions ignore the user override over REST and
-    # always exec as root. Record the actual behaviour.
-    if uid == "0":
-        pytest.skip("user= parameter not effective over REST on this runner")
+    assert out.strip() == "65534:65534"
 
 
 # ── concurrent exec isolation ──────────────────────────────────────

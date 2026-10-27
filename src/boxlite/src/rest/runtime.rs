@@ -523,6 +523,18 @@ mod tests {
     async fn http_server(
         replies: Vec<(u16, &'static str)>,
     ) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+        let (port, server) = exchange_server(replies).await;
+        let lines = tokio::spawn(async move {
+            let requests = server.await.unwrap();
+            requests.into_iter().map(|(line, _)| line).collect()
+        });
+        (port, lines)
+    }
+
+    /// Like [`http_server`], but returns each request line with its body.
+    async fn exchange_server(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (u16, tokio::task::JoinHandle<Vec<(String, String)>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
@@ -534,7 +546,20 @@ mod tests {
                     headers.push(socket.read_u8().await.unwrap());
                 }
                 let request = String::from_utf8(headers).unwrap();
-                requests.push(request.lines().next().unwrap().to_string());
+                let length = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut request_body = vec![0; length];
+                socket.read_exact(&mut request_body).await.unwrap();
+                requests.push((
+                    request.lines().next().unwrap().to_string(),
+                    String::from_utf8(request_body).unwrap(),
+                ));
                 socket
                     .write_all(
                         format!(
@@ -672,6 +697,74 @@ mod tests {
             .expect("create without a capability policy");
 
         assert_eq!(server.await.unwrap(), ["POST /v1/boxes HTTP/1.1"]);
+    }
+
+    /// A server that does not honor `ExecRequest.user` would run the command
+    /// as the box default user, so the client must refuse before sending it.
+    #[tokio::test]
+    async fn exec_user_requires_server_advertisement() {
+        let (port, server) = json_server(vec![BOX_RESPONSE, r#"{"capabilities":{}}"#]).await;
+        let runtime =
+            RestRuntime::new(&BoxliteRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let sandbox = RuntimeBackend::get(&runtime, "named")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = sandbox
+            .exec(crate::BoxCommand::new("id").user("1000:1000"))
+            .await;
+
+        assert!(matches!(result, Err(BoxliteError::Unsupported(_))));
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /v1/boxes/named HTTP/1.1", "GET /v1/config HTTP/1.1"]
+        );
+    }
+
+    /// The exec body carries `user` exactly when the command sets one, and
+    /// only a command with a user probes the server's capabilities.
+    #[tokio::test]
+    async fn exec_request_body_carries_user_only_when_set() {
+        const EXEC_RESPONSE: &str = r#"{"execution_id":"exec-1"}"#;
+        let cases: [(Option<&str>, &[(u16, &'static str)]); 2] = [
+            (None, &[(200, BOX_RESPONSE), (201, EXEC_RESPONSE)]),
+            (
+                Some("1000:1000"),
+                &[
+                    (200, BOX_RESPONSE),
+                    (200, r#"{"capabilities":{"exec_user_enabled":true}}"#),
+                    (201, EXEC_RESPONSE),
+                ],
+            ),
+        ];
+
+        for (user, replies) in cases {
+            let (port, server) = exchange_server(replies.to_vec()).await;
+            let runtime =
+                RestRuntime::new(&BoxliteRestOptions::new(format!("http://127.0.0.1:{port}")))
+                    .unwrap();
+            let sandbox = RuntimeBackend::get(&runtime, "named")
+                .await
+                .unwrap()
+                .unwrap();
+            let mut command = crate::BoxCommand::new("id");
+            if let Some(user) = user {
+                command = command.user(user);
+            }
+
+            sandbox.exec(command).await.expect("exec");
+
+            let requests = server.await.unwrap();
+            let (line, body) = requests.last().unwrap();
+            assert_eq!(
+                line,
+                "POST /v1/boxes/01HJK4TNRPQSXYZ8WM6NCVT9R5/exec HTTP/1.1"
+            );
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(body.get("user").and_then(|v| v.as_str()), user, "{body}");
+            assert_eq!(requests.len(), replies.len(), "{user:?}: {requests:?}");
+        }
     }
 
     /// Inspection reads the shared routes. Addressing a versioned variant here

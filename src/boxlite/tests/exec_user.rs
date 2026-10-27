@@ -118,6 +118,35 @@ async fn test_exec_user_overrides() {
     tb.teardown().await;
 }
 
+/// An unknown user or group is the caller's mistake, not an internal failure,
+/// and the command must not run.
+#[tokio::test]
+async fn test_exec_user_invalid_spec_is_invalid_argument() {
+    let tb = TestBox::new().await;
+
+    for spec in ["nosuchuser", "1000:nosuchgroup", ":1000"] {
+        let result = tb
+            .handle
+            .exec(BoxCommand::new("touch").arg("/tmp/marker-2116").user(spec))
+            .await;
+        assert!(
+            matches!(result, Err(boxlite::BoxliteError::InvalidArgument(_))),
+            "{spec}: got {:?}",
+            result.err()
+        );
+    }
+
+    let mut check = tb
+        .handle
+        .exec(BoxCommand::new("test").args(["-e", "/tmp/marker-2116"]))
+        .await
+        .expect("exec test");
+    let status = check.wait().await.expect("wait failed");
+    assert_eq!(status.exit_code, 1, "rejected commands must not run");
+
+    tb.teardown().await;
+}
+
 /// A non-root exec-user image (grafana/grafana, User="472") must satisfy two
 /// properties inside the running box:
 ///

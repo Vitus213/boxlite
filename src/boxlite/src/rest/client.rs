@@ -590,6 +590,19 @@ impl ApiClient {
         ensure_capability("private tunnel", capabilities.private_tunnels_enabled)
     }
 
+    pub async fn require_exec_user_enabled(&self) -> BoxliteResult<()> {
+        // A server that ignores `user` runs the command as the box default
+        // user (often root), so recheck the live endpoint before every exec
+        // that names one rather than trusting a cached answer.
+        let config = self.fetch_config().await?;
+        let capabilities = config.capabilities.ok_or_else(|| {
+            BoxliteError::Unsupported(
+                "Remote server did not advertise per-exec user support".to_string(),
+            )
+        })?;
+        ensure_capability("per-exec user", capabilities.exec_user_enabled)
+    }
+
     pub async fn require_clone_enabled(&self) -> BoxliteResult<()> {
         let config = self.get_config().await?;
         let capabilities = config.capabilities.ok_or_else(|| {

@@ -207,14 +207,17 @@ describe('BoxLite REST routing', () => {
     expect(updateInboundEnabled).not.toHaveBeenCalled()
   })
 
-  // Clients call the inbound route only when the server advertises it, so a
-  // server without the route reports "unsupported" rather than a bare 404.
-  it('advertises inbound updates in /v1/config', async () => {
+  // Clients call the inbound route, and send a per-exec user, only when the
+  // server advertises it; otherwise they report "unsupported" instead of a
+  // bare 404 or a command silently run as the box default user.
+  it('advertises inbound updates and exec user overrides in /v1/config', async () => {
     await startRoutingTestApp()
 
     const response = await get('/api/v1/config')
+    const body = await response.json()
 
-    expect((await response.json()).capabilities.inbound_update_enabled).toBe(true)
+    expect(body.capabilities.inbound_update_enabled).toBe(true)
+    expect(body.capabilities.exec_user_enabled).toBe(true)
   })
 
   // An older API ignores isPublic and would publish the port, so clients

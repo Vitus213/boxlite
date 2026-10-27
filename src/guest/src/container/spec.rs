@@ -368,7 +368,7 @@ fn find_user_in_passwd(rootfs: &str, name: &str) -> BoxliteResult<(u32, u32)> {
         }
     }
 
-    Err(BoxliteError::Internal(format!(
+    Err(BoxliteError::InvalidArgument(format!(
         "User '{}' not found in {}",
         name,
         path.display()
@@ -427,7 +427,7 @@ fn find_group_in_group_file(rootfs: &str, name: &str) -> BoxliteResult<u32> {
         }
     }
 
-    Err(BoxliteError::Internal(format!(
+    Err(BoxliteError::InvalidArgument(format!(
         "Group '{}' not found in {}",
         name,
         path.display()
@@ -1115,7 +1115,12 @@ mod tests {
     fn test_resolve_user_unknown_name_errors() {
         let rootfs = make_test_rootfs();
         let r = rootfs.path().to_str().unwrap();
-        let err = resolve_user(r, "nonexistent").unwrap_err().to_string();
+        let err = resolve_user(r, "nonexistent").unwrap_err();
+        assert!(
+            matches!(err, BoxliteError::InvalidArgument(_)),
+            "got: {err:?}"
+        );
+        let err = err.to_string();
         assert!(err.contains("User 'nonexistent' not found"), "got: {}", err);
     }
 
@@ -1123,9 +1128,12 @@ mod tests {
     fn test_resolve_user_unknown_group_errors() {
         let rootfs = make_test_rootfs();
         let r = rootfs.path().to_str().unwrap();
-        let err = resolve_user(r, "abc:nonexistent_group")
-            .unwrap_err()
-            .to_string();
+        let err = resolve_user(r, "abc:nonexistent_group").unwrap_err();
+        assert!(
+            matches!(err, BoxliteError::InvalidArgument(_)),
+            "got: {err:?}"
+        );
+        let err = err.to_string();
         assert!(
             err.contains("Group 'nonexistent_group' not found"),
             "got: {}",
@@ -1142,7 +1150,11 @@ mod tests {
         let rootfs = make_test_rootfs();
         let r = rootfs.path().to_str().unwrap();
         // ":1000" → user_part="" → u32 parse fails → tries find_user_in_passwd("") → not found
-        assert!(resolve_user(r, ":1000").is_err());
+        let err = resolve_user(r, ":1000").unwrap_err();
+        assert!(
+            matches!(err, BoxliteError::InvalidArgument(_)),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -1150,7 +1162,11 @@ mod tests {
         let rootfs = make_test_rootfs();
         let r = rootfs.path().to_str().unwrap();
         // ":" → user_part="", group_part="" → user lookup fails
-        assert!(resolve_user(r, ":").is_err());
+        let err = resolve_user(r, ":").unwrap_err();
+        assert!(
+            matches!(err, BoxliteError::InvalidArgument(_)),
+            "got: {err:?}"
+        );
     }
 
     // ==================
