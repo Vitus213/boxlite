@@ -2,6 +2,7 @@ package boxlite
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -58,6 +59,22 @@ func TestIsInvalidState(t *testing.T) {
 	}
 	if IsInvalidState(errors.New("other")) {
 		t.Error("expected IsInvalidState to return false for non-Error")
+	}
+}
+
+func TestIsInvalidArgument(t *testing.T) {
+	err := &Error{Code: ErrInvalidArgument, Message: "unknown user"}
+	if !IsInvalidArgument(err) {
+		t.Error("expected IsInvalidArgument to return true")
+	}
+	if IsInvalidArgument(errors.New("other")) {
+		t.Error("expected IsInvalidArgument to return false for non-Error")
+	}
+	// The runner wraps start failures before classifying them, so the
+	// predicate must see through %w wrapping (this is what turns an
+	// unknown exec user into a 400 instead of a 500).
+	if !IsInvalidArgument(fmt.Errorf("failed to start execution: %w", err)) {
+		t.Error("expected IsInvalidArgument to unwrap wrapped errors")
 	}
 }
 

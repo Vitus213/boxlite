@@ -3,6 +3,8 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +12,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	sdkboxlite "github.com/boxlite-ai/boxlite/sdks/go"
 	"github.com/boxlite-ai/runner/pkg/boxlite"
 	"github.com/gin-gonic/gin"
 )
@@ -306,5 +310,70 @@ func TestBoxliteExecSignalClosedReturns409(t *testing.T) {
 	// Should be 409 (closed/conflict), not 404
 	if w.Code != http.StatusConflict {
 		t.Fatalf("signal on closed exec: expected 409, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// The status mapping is the runner's half of the #2116 contract: an unknown
+// exec user must reach the caller as 400 (the REST client maps it back to
+// InvalidArgument), and a %w-wrapped SDK error must still classify — the
+// exec manager wraps every start failure before it gets here.
+func TestExecStartStatus(t *testing.T) {
+	wrap := func(err error) error {
+		return fmt.Errorf("failed to start execution: %w", err)
+	}
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"stopped", wrap(&sdkboxlite.Error{Code: sdkboxlite.ErrStopped, Message: "stopped"}), http.StatusConflict},
+		{"invalid state", wrap(&sdkboxlite.Error{Code: sdkboxlite.ErrInvalidState, Message: "bad state"}), http.StatusConflict},
+		{"invalid argument", wrap(&sdkboxlite.Error{Code: sdkboxlite.ErrInvalidArgument, Message: "User 'x' not found"}), http.StatusBadRequest},
+		{"plain invalid argument", &sdkboxlite.Error{Code: sdkboxlite.ErrInvalidArgument, Message: "User 'x' not found"}, http.StatusBadRequest},
+		{"runner fault", wrap(errors.New("seccomp failed")), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		if got := execStartStatus(tc.err); got != tc.want {
+			t.Errorf("%s: execStartStatus() = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// ExecRequest.user must survive the wire-to-options translation: dropping
+// it here is how #2116 lost the field on the hosted path in the first place.
+func TestStartOptionsFrom(t *testing.T) {
+	timeout := 30.5
+	workdir := "/app"
+	got := startOptionsFrom(ExecRequest{
+		Command:        "python3",
+		Args:           []string{"-c", "print(1)"},
+		Env:            map[string]string{"K": "V"},
+		TimeoutSeconds: &timeout,
+		WorkingDir:     &workdir,
+		TTY:            true,
+		User:           "1000:1000",
+	})
+	if got.Command != "python3" || len(got.Args) != 2 || got.Args[1] != "print(1)" {
+		t.Errorf("command/args mismatch: %+v", got)
+	}
+	if got.Env["K"] != "V" {
+		t.Errorf("Env = %v", got.Env)
+	}
+	if !got.TTY {
+		t.Error("TTY should be true")
+	}
+	if got.User != "1000:1000" {
+		t.Errorf("User = %q, want %q", got.User, "1000:1000")
+	}
+	if got.WorkingDir != "/app" {
+		t.Errorf("WorkingDir = %q, want /app", got.WorkingDir)
+	}
+	if got.Timeout != 30500*time.Millisecond {
+		t.Errorf("Timeout = %v, want 30.5s", got.Timeout)
+	}
+
+	empty := startOptionsFrom(ExecRequest{})
+	if empty.User != "" || empty.WorkingDir != "" || empty.Timeout != 0 {
+		t.Errorf("empty request should carry zero values: %+v", empty)
 	}
 }

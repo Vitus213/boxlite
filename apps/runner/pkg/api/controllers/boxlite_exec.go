@@ -58,6 +58,19 @@ func BoxliteExec(ctx *gin.Context) {
 		return
 	}
 
+	execId, err := execManager.Start(ctx.Request.Context(), bx, boxId, startOptionsFrom(req))
+	if err != nil {
+		ctx.JSON(execStartStatus(err), gin.H{"error": fmt.Sprintf("exec failed: %s", err)})
+		return
+	}
+
+	ctx.JSON(http.StatusCreated, ExecResponse{ExecutionID: execId})
+}
+
+// startOptionsFrom translates the wire request into the exec start options.
+// Absent WorkingDir/TimeoutSeconds leave the zero values, matching the
+// "absent means default" contract in openapi/box.openapi.yaml.
+func startOptionsFrom(req ExecRequest) boxlite.StartOptions {
 	startOpts := boxlite.StartOptions{
 		Command: req.Command,
 		Args:    req.Args,
@@ -74,32 +87,26 @@ func BoxliteExec(ctx *gin.Context) {
 		// is equivalent to omitting the field — pass it straight through.
 		startOpts.Timeout = time.Duration(*req.TimeoutSeconds * float64(time.Second))
 	}
+	return startOpts
+}
 
-	execId, err := execManager.Start(ctx.Request.Context(), bx, boxId, startOpts)
-	if err != nil {
-		// Classify so a stopped / wrong-state box surfaces as 4xx, not
-		// 500. Without this the box-stopped case leaks
-		//   internal error: HTTP 500 Internal Server Error:
-		//   {"error":"exec failed: failed to start execution: boxlite: stopped:
-		//    Handle invalidated after stop(). ... (code=11)"}
-		// and the SDK's 'all 5xx is bug' guard fires. The Go SDK already
-		// gives us a typed bool for the two states that aren't 500 from
-		// the runner's perspective (the box exists but isn't accepting
-		// execs right now).
-		if sdkboxlite.IsStopped(err) || sdkboxlite.IsInvalidState(err) {
-			ctx.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("exec failed: %s", err)})
-			return
-		}
-		// An unknown user or group is the caller's mistake, not a runner fault.
-		if sdkboxlite.IsInvalidArgument(err) {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("exec failed: %s", err)})
-			return
-		}
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("exec failed: %s", err)})
-		return
+// execStartStatus classifies a failed exec start into the HTTP status the
+// caller should see. A stopped / wrong-state box is a 409: the box exists
+// but isn't accepting execs right now, and answering 500 leaks
+//   internal error: HTTP 500 Internal Server Error:
+//   {"error":"exec failed: failed to start execution: boxlite: stopped:
+//    Handle invalidated after stop(). ... (code=11)"}
+// and fires the SDK's 'all 5xx is bug' guard. An unknown user or group is
+// the caller's mistake (400), not a runner fault — answering 500 there would
+// hide the #2116 misclassification. Everything else is a runner fault (500).
+func execStartStatus(err error) int {
+	if sdkboxlite.IsStopped(err) || sdkboxlite.IsInvalidState(err) {
+		return http.StatusConflict
 	}
-
-	ctx.JSON(http.StatusCreated, ExecResponse{ExecutionID: execId})
+	if sdkboxlite.IsInvalidArgument(err) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
 }
 
 // allowedExecSignals is the whitelist of POSIX signal numbers callers may
