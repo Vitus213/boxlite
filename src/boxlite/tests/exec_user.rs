@@ -136,7 +136,7 @@ async fn test_exec_user_invalid_spec_is_invalid_argument() {
         );
     }
 
-    let mut check = tb
+    let check = tb
         .handle
         .exec(BoxCommand::new("test").args(["-e", "/tmp/marker-2116"]))
         .await
