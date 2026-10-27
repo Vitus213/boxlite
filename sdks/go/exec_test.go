@@ -1,7 +1,9 @@
 package boxlite
 
 import (
+	"context"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -67,4 +69,31 @@ func TestEnvMapToFlatPairs(t *testing.T) {
 			t.Fatalf("empty-value pair must round-trip, want %v got %v", want, got)
 		}
 	})
+}
+
+// The cgo boundary passes strings to C verbatim, but Rust reads them back with
+// CStr::from_ptr, which stops at the first NUL. Unguarded, "\x001000:1000"
+// reached the guest as "" — the box default, usually root — and
+// "root\x00junk" as "root": a silent identity change the caller could not see.
+func TestStartExecutionRejectsNULInUser(t *testing.T) {
+	for _, user := range []string{"\x001000:1000", "root\x00invalid"} {
+		// No runtime and no box handle: rejection must happen before the call
+		// reaches the C boundary, so nothing is ever started.
+		_, err := (&Box{}).StartExecution(context.Background(), "id", nil, &ExecutionOptions{User: user})
+		if !IsInvalidArgument(err) {
+			t.Fatalf("user %q: got %v, want ErrInvalidArgument", user, err)
+		}
+		if want := "user must not contain NUL bytes"; !strings.Contains(err.Error(), want) {
+			t.Fatalf("user %q: error %q does not report %q", user, err, want)
+		}
+	}
+}
+
+// A NUL-free user must still cross the boundary untouched: it is the C side's
+// nil-handle check that rejects this call, not the guard.
+func TestStartExecutionPassesNULFreeUser(t *testing.T) {
+	_, err := (&Box{}).StartExecution(context.Background(), "id", nil, &ExecutionOptions{User: "1000:1000"})
+	if err == nil || strings.Contains(err.Error(), "NUL") {
+		t.Fatalf("NUL-free user must reach the C boundary, got %v", err)
+	}
 }

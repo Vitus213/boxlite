@@ -11,6 +11,7 @@ import (
 	"io"
 	"runtime/cgo"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -235,6 +236,16 @@ func (b *Box) StartExecution(_ context.Context, name string, args []string, opts
 
 	var cUser *C.char
 	if cfg.User != "" {
+		// C.CString copies the bytes verbatim, but Rust reads them back with
+		// CStr::from_ptr, which stops at the first NUL: "\x001000:1000" would
+		// arrive as "" (the box default, usually root) and "root\x00junk" as
+		// "root". Reject rather than run as an identity nobody asked for.
+		if strings.IndexByte(cfg.User, 0) >= 0 {
+			return nil, &Error{
+				Code:    ErrInvalidArgument,
+				Message: "user must not contain NUL bytes",
+			}
+		}
 		cUser = toCString(cfg.User)
 		defer C.free(unsafe.Pointer(cUser))
 	}

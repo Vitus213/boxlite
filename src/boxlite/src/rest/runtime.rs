@@ -832,7 +832,18 @@ mod tests {
                 "POST /v1/boxes/01HJK4TNRPQSXYZ8WM6NCVT9R5/exec HTTP/1.1"
             );
             let body: serde_json::Value = serde_json::from_str(body).unwrap();
-            assert_eq!(body.get("user").and_then(|v| v.as_str()), user, "{body}");
+            // `None` must mean the field is absent, not `null`: `ExecRequest`
+            // carries `skip_serializing_if = "Option::is_none"`, and reading
+            // the value alone cannot tell a missing field from an explicit
+            // null, so the "only when set" half of this test would go blind.
+            match user {
+                Some(user) => assert_eq!(
+                    body.get("user").and_then(|value| value.as_str()),
+                    Some(user),
+                    "{body}"
+                ),
+                None => assert!(body.get("user").is_none(), "{body}"),
+            }
             assert_eq!(requests.len(), replies.len(), "{user:?}: {requests:?}");
         }
     }
