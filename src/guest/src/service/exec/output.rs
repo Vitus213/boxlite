@@ -124,6 +124,19 @@ impl OutputManager {
         manager
     }
 
+    /// Reuse the bounded replay buffer for a process that could not be launched.
+    pub(crate) async fn completed(mut diagnostic: String, tty: bool) -> Self {
+        diagnostic.push('\n');
+        let manager = Self::new(None, None);
+        let source = if tty {
+            OutputSource::Stdout
+        } else {
+            OutputSource::Stderr
+        };
+        manager.push(source, diagnostic.into_bytes()).await;
+        manager
+    }
+
     pub(crate) async fn shutdown_drains(&self) {
         let tasks = std::mem::take(
             &mut *self

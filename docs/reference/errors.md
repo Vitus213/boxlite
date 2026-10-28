@@ -190,26 +190,32 @@ ps aux | grep boxlite-shim
 Command execution error.
 
 **Cause:**
-- Command not found in image
 - Command crashed or killed
 - Execution timeout
 - Streaming I/O error
 
+A missing or non-executable command is *not* an `Execution` error: the guest
+reports it as a finished execution with the POSIX status, so `wait()` returns
+`exit_code == 127` (not found) or `126` (found, not executable) and the
+diagnostic arrives on stderr.
+
 **Example:**
 ```text
-Error: Execution error: command not found: python3
+Error: Execution error: execution timed out after 30s
 ```
 
 **Solution:**
-- Verify command exists in image:
-  ```python
-  result = await box.exec("which", "python3")
-  ```
 - Check exit code and stderr:
   ```python
   result = await box.exec("command")
   if result.exit_code != 0:
       print(f"Failed: {result.stderr}")
+  ```
+- Treat `127` as "probe another tool" rather than a platform fault:
+  ```python
+  result = await box.exec("python3", "--version")
+  if result.exit_code == 127:
+      result = await box.exec("python", "--version")
   ```
 
 ### `Internal(String)`

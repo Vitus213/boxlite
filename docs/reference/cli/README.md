@@ -359,6 +359,12 @@ separator is required (`src/cli/src/commands/exec.rs:22`, `last = true`).
 
 **Exit behavior:** Same as `boxlite run` (foreground streams + propagates exit code; detach exits `0`). After a foreground exec finishes the CLI calls `runtime.shutdown(None)` to release the box handle gracefully.
 
+A command the guest refuses to launch is still a completed execution, so it
+propagates as a normal status rather than an `Error:` line: `127` when the
+executable is not in the guest's `PATH`, `126` when it exists but is not
+executable. The guest's diagnostic goes to stderr. `boxlite serve` returns the
+same statuses over REST.
+
 **Examples:**
 
 ```bash
@@ -1136,7 +1142,7 @@ For a richer treatment of the registry config (auth flows, fallbacks, mirrors), 
 | `0` | success | Command (or box command) finished successfully |
 | `1` | runtime | Any anyhow error from a CLI command — `main.rs:71` prints `Error: ...` to stderr and exits `1` |
 | `2` | clap | Invalid CLI usage (unknown flag, missing required arg, bad value) |
-| `N` (1-127) | box command | `run`/`exec` propagate the box command's exit status |
+| `N` (1-127) | box command | `run`/`exec` propagate the box command's exit status, including `126` (command found but not executable) and `127` (command not found) |
 | `128 + N` | signal | `run`/`exec` exited because the box command was killed by signal *N* (e.g. `137` for `SIGKILL`, `143` for `SIGTERM`) |
 
 `boxlite rm`, `start`, `stop`, `restart` aggregate per-target errors and exit `1` if any target failed, after attempting all targets.

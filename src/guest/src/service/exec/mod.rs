@@ -41,6 +41,7 @@ use boxlite_shared::{
     ResizeTtyResponse, SendInputAck, WaitRequest, WaitResponse,
 };
 use futures::stream::{Stream, StreamExt as _};
+use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -404,37 +405,35 @@ async fn spawn_execution(
 
     let spawned_at = std::time::Instant::now();
 
-    // Step 1: Spawn process using executor selected by BOXLITE_EXECUTOR env var
-    let (child, container_ref) =
-        spawn_with_executor(server, &req, &execution_id, ssh_workload).await?;
-
-    let leader_pid = child.pid();
-    let pid = leader_pid.as_raw() as u32;
-    let process = process_instance::ProcessInstance::capture(leader_pid);
-    if process.is_none() {
-        warn!(
-            execution_id = %execution_id,
-            pid = leader_pid.as_raw(),
-            "failed to capture process identity; signals will be skipped"
-        );
-    }
-
-    // Register this pid's exit slot at the spawn, not at the wait: a detached
-    // exec sends no Wait until its caller chooses to, and in between the exit
-    // would age out as an ownerless stray.
-    let reaper = crate::reaper::REAPER
-        .get()
-        .expect("reaper installed at startup");
-    let exit = reaper.register(leader_pid, spawned_at).await;
-
-    // Step 2: Create execution state and register
-    // If running inside a container, pass the init health checker for death detection
-    let state = match container_ref {
-        Some(container) => {
-            let health: std::sync::Arc<tokio::sync::Mutex<dyn InitHealthCheck>> = container;
-            state::ExecutionState::new_with_init_health(child, health, exit, process)
+    let (state, pid, process) = match spawn_with_executor(server, &req, &execution_id, ssh_workload)
+        .await?
+    {
+        SpawnedExecution::Rejected(rejection) => (
+            state::ExecutionState::rejected(rejection, req.tty.is_some()).await,
+            0,
+            None,
+        ),
+        SpawnedExecution::Process(child, container_ref) => {
+            let leader_pid = child.pid();
+            let pid = leader_pid.as_raw() as u32;
+            let process = process_instance::ProcessInstance::capture(leader_pid);
+            if process.is_none() {
+                warn!(execution_id = %execution_id, pid, "failed to capture process identity; signals will be skipped");
+            }
+            let exit = crate::reaper::REAPER
+                .get()
+                .expect("reaper installed at startup")
+                .register(leader_pid, spawned_at)
+                .await;
+            let state = match container_ref {
+                Some(container) => {
+                    let health: std::sync::Arc<tokio::sync::Mutex<dyn InitHealthCheck>> = container;
+                    state::ExecutionState::new_with_init_health(child, health, exit, process)
+                }
+                None => state::ExecutionState::new(child, exit, process),
+            };
+            (state, pid, process)
         }
-        None => state::ExecutionState::new(child, exit, process),
     };
     if let Some(reservation) = reservation {
         if !server.registry.publish(reservation, state.clone()).await {
@@ -459,7 +458,7 @@ async fn spawn_execution(
     }
 
     // Step 3: Start timeout watcher (if requested)
-    if req.timeout_ms > 0 {
+    if req.timeout_ms > 0 && pid != 0 {
         let timeout_task = timeout::start_timeout_watcher(
             timeout::TimeoutTarget::new(process),
             execution_id.clone(),
@@ -558,6 +557,14 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+enum SpawnedExecution {
+    Process(
+        exec_handle::ExecHandle,
+        Option<std::sync::Arc<tokio::sync::Mutex<crate::container::Container>>>,
+    ),
+    Rejected(crate::container::CommandRejection),
+}
+
 /// Spawn process with executor selected by BOXLITE_EXECUTOR env var.
 ///
 /// Returns (ExecHandle, Option<container_ref>) — the container ref is provided
@@ -572,13 +579,7 @@ async fn spawn_with_executor(
     req: &ExecRequest,
     execution_id: &str,
     ssh_workload: Option<crate::service::ssh::SshWorkload>,
-) -> Result<
-    (
-        exec_handle::ExecHandle,
-        Option<std::sync::Arc<tokio::sync::Mutex<crate::container::Container>>>,
-    ),
-    ExecResponse,
-> {
+) -> Result<SpawnedExecution, ExecResponse> {
     use executor::Executor;
 
     let executor_value = req.env.get(executor_const::ENV_VAR).map(|s| s.as_str());
@@ -597,7 +598,7 @@ async fn spawn_with_executor(
                 .spawn(req)
                 .await
                 .map_err(|e| spawn_error(execution_id, e.to_string()))?;
-            Ok((handle, None))
+            Ok(SpawnedExecution::Process(handle, None))
         }
         Some(s) if s.starts_with(executor_const::CONTAINER_KEY) => {
             // Container executor: parse "container=<id>"
@@ -661,8 +662,11 @@ async fn spawn_with_executor(
             let executor = ContainerExecutor::new(container_arc);
             let container_ref = executor.container_ref();
             let spawn = match ssh_workload.as_ref() {
-                Some(workload) => executor.spawn_ssh_workload(req, workload.clone()).await,
-                None => executor.spawn(req).await,
+                Some(workload) => executor
+                    .spawn_ssh_workload(req, workload.clone())
+                    .await
+                    .map_err(crate::container::SpawnFailure::from),
+                None => executor.spawn_attempt(req).await,
             };
             let handle = match spawn {
                 Ok(h) => h,
@@ -679,8 +683,11 @@ async fn spawn_with_executor(
                         &container_ref,
                         move || async move {
                             match ssh_workload {
-                                Some(workload) => executor.spawn_ssh_workload(req, workload).await,
-                                None => executor.spawn(req).await,
+                                Some(workload) => executor
+                                    .spawn_ssh_workload(req, workload)
+                                    .await
+                                    .map_err(crate::container::SpawnFailure::from),
+                                None => executor.spawn_attempt(req).await,
                             }
                         },
                         e,
@@ -688,7 +695,10 @@ async fn spawn_with_executor(
                     .await;
                     match retry {
                         Ok(h) => h,
-                        Err(e) => {
+                        Err(crate::container::SpawnFailure::Rejected(rejection)) => {
+                            return Ok(SpawnedExecution::Rejected(rejection));
+                        }
+                        Err(crate::container::SpawnFailure::Failed(e)) => {
                             // Check if container init died — provide actionable diagnostics
                             let mut container = container_ref.lock().await;
                             if !container.is_running() {
@@ -710,7 +720,7 @@ async fn spawn_with_executor(
                     }
                 }
             };
-            Ok((handle, Some(container_ref)))
+            Ok(SpawnedExecution::Process(handle, Some(container_ref)))
         }
         Some(unknown) => {
             // Unknown executor value
@@ -736,16 +746,14 @@ async fn spawn_with_executor(
 /// handshake) after Phase 1 already spawned the process, and a retry would
 /// execute the user's command twice. A Stopped container fails run_init and
 /// the original error is returned unchanged.
-async fn revive_and_retry<F, Fut>(
+async fn revive_and_retry<F, Fut, E>(
     container_ref: &std::sync::Arc<tokio::sync::Mutex<crate::container::Container>>,
     spawn_again: F,
-    original_error: boxlite_shared::errors::BoxliteError,
-) -> boxlite_shared::errors::BoxliteResult<exec_handle::ExecHandle>
+    original_error: E,
+) -> Result<exec_handle::ExecHandle, E>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<
-        Output = boxlite_shared::errors::BoxliteResult<exec_handle::ExecHandle>,
-    >,
+    Fut: Future<Output = Result<exec_handle::ExecHandle, E>>,
 {
     let revive = {
         let container = container_ref.lock().await;
@@ -990,8 +998,7 @@ mod container_id_path_tests {
         drop(stderr_peer);
         let handle = ExecHandle::new(Pid::from_raw(13_001), stdin, stdout, Some(stderr))
             .expect("test pipes must register with Tokio");
-        let state =
-            ExecutionState::new_for_test(handle, ExitSlot::settled_for_test(ExitStatus::Code(0)));
+        let state = ExecutionState::new_for_test(handle, ExitSlot::settled(ExitStatus::Code(0)));
         let snapshot = state.wait_terminal_snapshot("retained-exec").await;
         server
             .registry
@@ -1020,8 +1027,7 @@ mod container_id_path_tests {
         drop(stderr_peer);
         let handle = ExecHandle::new(Pid::from_raw(13_004), stdin, stdout, Some(stderr))
             .expect("test pipes must register with Tokio");
-        let state =
-            ExecutionState::new_for_test(handle, ExitSlot::settled_for_test(ExitStatus::Code(0)));
+        let state = ExecutionState::new_for_test(handle, ExitSlot::settled(ExitStatus::Code(0)));
         let snapshot = state.wait_terminal_snapshot("retained-output-exec").await;
         server
             .registry
@@ -1068,8 +1074,7 @@ mod container_id_path_tests {
         drop(stderr_peer);
         let handle = ExecHandle::new(Pid::from_raw(13_002), stdin, stdout, Some(stderr))
             .expect("test pipes must register with Tokio");
-        let state =
-            ExecutionState::new_for_test(handle, ExitSlot::settled_for_test(ExitStatus::Code(0)));
+        let state = ExecutionState::new_for_test(handle, ExitSlot::settled(ExitStatus::Code(0)));
         state.wait_terminal_output_summary().await;
         server
             .registry
@@ -1095,8 +1100,7 @@ mod container_id_path_tests {
         drop(stderr_peer);
         let handle = ExecHandle::new(Pid::from_raw(13_003), stdin, stdout, Some(stderr))
             .expect("test pipes must register with Tokio");
-        let state =
-            ExecutionState::new_for_test(handle, ExitSlot::settled_for_test(ExitStatus::Code(0)));
+        let state = ExecutionState::new_for_test(handle, ExitSlot::settled(ExitStatus::Code(0)));
         state.wait_terminal_output_summary().await;
         server
             .registry

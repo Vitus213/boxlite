@@ -4,7 +4,7 @@
 //! - ContainerExecutor: runs commands inside OCI container
 //! - GuestExecutor: runs commands directly on guest
 
-use crate::container::Container;
+use crate::container::{Container, SpawnFailure};
 use crate::service::exec::exec_handle::{ExecHandle, PtyConfig};
 use async_trait::async_trait;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
@@ -43,14 +43,23 @@ impl ContainerExecutor {
         req: &ExecRequest,
         workload: crate::service::ssh::SshWorkload,
     ) -> BoxliteResult<ExecHandle> {
-        self.spawn_request(req, Some(workload)).await
+        self.spawn_request(req, Some(workload))
+            .await
+            .map_err(SpawnFailure::into_boxlite)
+    }
+
+    pub(crate) async fn spawn_attempt(
+        &self,
+        req: &ExecRequest,
+    ) -> Result<ExecHandle, SpawnFailure> {
+        self.spawn_request(req, None).await
     }
 
     async fn spawn_request(
         &self,
         req: &ExecRequest,
         ssh_workload: Option<crate::service::ssh::SshWorkload>,
-    ) -> BoxliteResult<ExecHandle> {
+    ) -> Result<ExecHandle, SpawnFailure> {
         use crate::container::SpawnResult;
 
         let start = std::time::Instant::now();
@@ -97,7 +106,7 @@ impl ContainerExecutor {
         // timeout. This does NOT need the container mutex — chdir() is done.
         let result = match spawn_result {
             SpawnResult::Ready(handle) => Ok(handle),
-            SpawnResult::PtyPending(pending) => pending.finish(),
+            SpawnResult::PtyPending(pending) => pending.finish().map_err(SpawnFailure::from),
         };
 
         tracing::info!(
@@ -113,7 +122,9 @@ impl ContainerExecutor {
 #[async_trait]
 impl Executor for ContainerExecutor {
     async fn spawn(&self, req: &ExecRequest) -> BoxliteResult<ExecHandle> {
-        self.spawn_request(req, None).await
+        self.spawn_request(req, None)
+            .await
+            .map_err(SpawnFailure::into_boxlite)
     }
 }
 

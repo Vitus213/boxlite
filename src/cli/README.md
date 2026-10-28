@@ -500,6 +500,12 @@ refused, so start that box deliberately with `boxlite start` first.
 boxlite exec -it mybox -- /bin/sh
 ```
 
+A command the guest refuses to start is a completed execution, not a transport
+error: `boxlite exec` exits `127` when the executable is not found and `126`
+when it exists but is not executable, printing the guest's diagnostic on
+stderr. The same statuses come back through `boxlite serve` over REST, so
+callers never have to parse a nested error chain to learn a binary is missing.
+
 ### `boxlite list` (alias: `ls`, `ps`)
 
 List boxes.
