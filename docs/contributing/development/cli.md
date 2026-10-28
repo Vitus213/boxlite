@@ -70,6 +70,15 @@ once before dispatching to API-key, browser, or device login; each flow receives
 that resolved URL. The `auth` integration target validates authentication and
 credential storage against loopback HTTP services with isolated credential stores.
 
+The missing-image cleanup regression in `run.rs` uses a loopback HTTP registry
+with an isolated runtime configuration. It observes the actual manifest request,
+returns `MANIFEST_UNKNOWN` with HTTP 404, and requires normal exit code 1 plus no
+live shim. This keeps the pull-error path independent of Docker Hub and prevents
+a deadline-killed child or an unrelated initialization error from passing.
+The multithread Tokio runtime serves requests while the synchronous CLI command
+runs and owns the registry tasks through teardown. Proxy variables are removed
+only from that child; its 30-second deadline remains a deadlock bound.
+
 VM integration tests pull images, create boxes, and run real commands. They require a working VM environment (KVM on Linux or Hypervisor.framework on macOS). Tests use a shared test home (`/tmp/bl`), a global lock to avoid concurrent use, and pre-pulled images (`alpine:latest`, `python:alpine`) to reduce rate limits.
 
 ### CLI test layout

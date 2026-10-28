@@ -89,18 +89,66 @@ fn test_run_rm_non_zero_exit_does_not_leak_shim() {
 /// language guarantee that stack unwinding always runs `Drop`, plus
 /// `PerTestBoxHome::Drop`'s implicit leak panic across every test using
 /// `common::boxlite()`. Not adding fragile mock-injection tests for those.
-#[test]
-fn test_run_image_pull_failure_does_not_leak_shim() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_run_image_pull_failure_does_not_leak_shim() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use axum::{Json, Router, http::StatusCode, routing::get};
+
     let mut ctx = common::boxlite_bare();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let manifest_requested = Arc::new(AtomicBool::new(false));
+    let observed = manifest_requested.clone();
+    let registry = Router::new()
+        .route("/v2/", get(|| async { StatusCode::OK }))
+        .route(
+            "/v2/missing/manifests/latest",
+            get(move || {
+                observed.store(true, Ordering::SeqCst);
+                async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({
+                            "errors": [{"code": "MANIFEST_UNKNOWN", "message": "manifest unknown"}]
+                        })),
+                    )
+                }
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, registry).await.unwrap() });
+
+    let config = ctx.home.join("missing-image-registry.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({
+            "image_registries": [{"host": host, "transport": "http"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    for proxy in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        ctx.cmd.env_remove(proxy);
+    }
+    let image = format!("{host}/missing:latest");
     ctx.cmd.timeout(std::time::Duration::from_secs(30));
-    ctx.cmd.args([
-        "run",
-        "--rm",
-        "docker.io/boxlite-test-does-not-exist/nonexistent-image:latest",
-        "echo",
-        "hi",
-    ]);
-    ctx.cmd.assert().failure();
+    ctx.cmd
+        .arg("--config")
+        .arg(config)
+        .args(["run", "--rm", &image, "echo", "hi"]);
+    ctx.cmd.assert().code(1);
+    assert!(
+        manifest_requested.load(Ordering::SeqCst),
+        "CLI failed before requesting the missing manifest"
+    );
 
     let boxes_dir = ctx.home.join("boxes");
     let leaks = boxlite_test_utils::home::live_shim_pids(&boxes_dir);
@@ -852,25 +900,6 @@ fn test_run_signal_exit_code_sigint() {
 // ============================================================================
 // Other Tests
 // ============================================================================
-
-#[test]
-fn test_run_invalid_image() {
-    let mut ctx = common::boxlite_bare();
-    ctx.cmd.timeout(std::time::Duration::from_secs(30));
-    ctx.cmd.args([
-        "run",
-        "docker.io/boxlite-test-does-not-exist/nonexistent-image:latest",
-        "echo",
-        "hi",
-    ]);
-    ctx.cmd.assert().failure().stderr(
-        predicate::str::contains("failed to pull")
-            .or(predicate::str::contains("not found"))
-            .or(predicate::str::contains("Not authorized"))
-            .or(predicate::str::contains("manifest unknown"))
-            .or(predicate::str::contains("pull access denied")),
-    );
-}
 
 #[test]
 fn test_run_tty_error_in_pipe() {
