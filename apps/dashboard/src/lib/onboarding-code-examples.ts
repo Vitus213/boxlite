@@ -1,7 +1,7 @@
 import definitions from './quickstart/interfaces.json'
 import cTemplate from './quickstart/templates/c.c?raw'
 import cliTemplate from './quickstart/templates/cli.sh?raw'
-import cliStepsTemplate from './quickstart/templates/cli-steps.sh?raw'
+import previewServer from './quickstart/templates/preview-server.py?raw'
 import goTemplate from './quickstart/templates/go.go?raw'
 import pythonTemplate from './quickstart/templates/python.py?raw'
 import restTemplate from './quickstart/templates/rest.sh?raw'
@@ -47,9 +47,9 @@ export BOXLITE_API_KEY`
 
   return `if [ -z "\${BOXLITE_API_KEY:-}" ]; then
   printf "Paste your BoxLite API key from Step 1: " >&2
-  stty -echo
+  if [ -t 0 ]; then stty -echo; fi
   IFS= read -r BOXLITE_API_KEY
-  stty echo
+  if [ -t 0 ]; then stty echo; fi
   printf "\\n" >&2
 fi
 export BOXLITE_API_KEY`
@@ -59,9 +59,17 @@ function buildTemplateValues(options: RenderOnboardingCodeExampleOptions): Templ
   const apiKey = options.apiKey
   const command = options.command ?? { executable: 'echo', args: ['Hello from BoxLite SDK'] }
   return {
-    REST_EXECUTION_RESULT: options.command
-      ? restWaitTemplate.trimEnd()
-      : 'curl -fsS "${BOXLITE_REST_URL}/v1/boxes/${box_id}/executions/${exec_id}" "${auth[@]}" | jq',
+    REST_EXECUTION_RESULT: restWaitTemplate.trimEnd(),
+    SERVER_PY: `"""${previewServer.trimEnd()}"""`,
+    SERVER_TS: `\`${previewServer.trimEnd()}\``,
+    SERVER_GO: `\`${previewServer.trimEnd()}\``,
+    SERVER_RS: `r#"${previewServer.trimEnd()}"#`,
+    SERVER_C: previewServer
+      .trimEnd()
+      .split('\n')
+      .map((line) => doubleQuoted(line + '\n'))
+      .join('\n        '),
+    SERVER_SH: shellSingleQuoted(previewServer.trimEnd()),
     COMMAND_LITERAL: doubleQuoted(command.executable),
     ARGUMENT_LITERALS: command.args.map(doubleQuoted).join(', '),
     ARGUMENT_COUNT: String(command.args.length),
@@ -112,17 +120,20 @@ function getDefinition(id: OnboardingInterface): QuickstartInterfaceDefinition {
   return definition
 }
 
-function renderExample(definition: QuickstartInterfaceDefinition, values: TemplateValues): OnboardingCodeExample {
+function renderSections(definition: QuickstartInterfaceDefinition, values: TemplateValues): string[] {
   const template = templateMap[definition.template]
-  if (!template) {
-    throw new Error(`Missing quickstart template: ${definition.template}`)
-  }
+  if (!template) throw new Error(`Missing quickstart template: ${definition.template}`)
+  const sections = template.split(/\{\{STEP_(?:EXECUTION|PREVIEW)\}\}/)
+  if (sections.length !== 3) throw new Error(`Missing quickstart sections for ${definition.id}`)
+  return sections.map((part) => renderTemplate(part, values).replace(/^\n+/, ''))
+}
 
+function renderExample(definition: QuickstartInterfaceDefinition, values: TemplateValues): OnboardingCodeExample {
   return {
     ...definition,
     install: renderCommand(definition.install, values),
     run: renderCommand(definition.run, values),
-    example: renderTemplate(template, values),
+    example: renderSections(definition, values).join('\n\n'),
   }
 }
 
@@ -149,21 +160,6 @@ export function renderOnboardingCodeSteps(
   selectedInterface: OnboardingInterface,
   options: RenderOnboardingCodeExampleOptions,
 ) {
-  const example =
-    selectedInterface === 'cli'
-      ? renderTemplate(cliStepsTemplate, buildTemplateValues(options))
-      : renderOnboardingCodeExample(selectedInterface, options)
-  const boundaries: Record<string, string> = {
-    python: '    execution = await box.exec(',
-    typescript: 'const exec = await box.exec(',
-    go: '    result, err := box.Exec(',
-    rust: '    let mut exec = box_handle',
-    c: '    const char *args[] =',
-    rest: 'exec_id="$(',
-    cli: 'boxlite exec "$box_name"',
-  }
-  const boundary = boundaries[selectedInterface]
-  const index = boundary ? example.indexOf(`\n${boundary}`) : -1
-  if (index < 0) throw new Error(`Missing execution boundary for ${selectedInterface}`)
-  return { creation: example.slice(0, index).trimEnd(), execution: example.slice(index + 1), example }
+  const [creation, execution, preview] = renderSections(getDefinition(selectedInterface), buildTemplateValues(options))
+  return { creation, execution, preview, example: [creation, execution, preview].join('\n\n') }
 }

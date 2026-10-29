@@ -9,7 +9,7 @@ import { getOnboardingInterfaces, renderOnboardingCodeExample } from '../onboard
 import { QUICKSTART_RECIPES, quickstartEntryFor, quickstartRecipeFor } from './recipes'
 
 describe('Quickstart recipes', () => {
-  it('waits for a REST recipe to finish before deleting its Box', () => {
+  it('waits for a REST recipe before publishing a preview and leaves its Box running', () => {
     const directory = mkdtempSync(join(tmpdir(), 'boxlite-rest-recipe-'))
     const script = renderOnboardingCodeExample('rest', {
       apiKey: 'mock',
@@ -20,6 +20,7 @@ describe('Quickstart recipes', () => {
       case "$*" in
         *DELETE*) printf 'delete\n' >> trace ;;
         */executions/*) if [ -f polled ]; then printf '{"status":"completed","exit_code":0}'; printf 'completed\n' >> trace; else touch polled; printf '{"status":"running","exit_code":null}'; printf 'running\n' >> trace; fi ;;
+        */network/tunnel*) printf '{"uri":"https://preview.test"}'; printf 'preview\n' >> trace ;;
         */exec*) printf '{"execution_id":"exec1"}' ;;
         */start*) printf '{}' ;;
         *) printf '{"box_id":"box1"}' ;;
@@ -28,12 +29,17 @@ describe('Quickstart recipes', () => {
     sleep() { :; }
     `
     try {
-      const result = spawnSync('bash', ['-c', fakeApi + script], { cwd: directory, encoding: 'utf8', timeout: 5000 })
+      const result = spawnSync('bash', ['-c', fakeApi + script], {
+        cwd: directory,
+        input: '\n',
+        encoding: 'utf8',
+        timeout: 5000,
+      })
       expect(result.status, result.stderr).toBe(0)
       expect(readFileSync(join(directory, 'trace'), 'utf8').trim().split('\n')).toEqual([
         'running',
         'completed',
-        'delete',
+        'preview',
       ])
     } finally {
       rmSync(directory, { recursive: true, force: true })

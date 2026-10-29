@@ -131,8 +131,10 @@ describe('OnboardingGuideDialog tabs', () => {
       '1. Get an API key',
       '2. Choose your SDK or CLI',
       '3. Create a Box',
-      '4. Run code',
+      '4. Run code and commands',
+      '5. Create a preview',
     ])
+    expect(document.body.textContent).toContain('Idle auto-stop still applies')
     expect(document.querySelector('select')).toBeNull()
     const cliButton = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
       (item) => item.textContent?.trim() === 'CLI',
@@ -332,8 +334,15 @@ it('copies each SDK/CLI step with a named key and switches all supported interfa
     const copies = [...document.querySelectorAll<HTMLButtonElement>('button')].filter(
       (b) => b.textContent === 'Copy' || b.textContent === 'Copy full example',
     )
-    expect(copies.length).toBeGreaterThanOrEqual(4)
+    expect(copies.length).toBeGreaterThanOrEqual(5)
+    mocks.copy.mockClear()
     for (const copy of copies) await click(copy)
+    const copied = mocks.copy.mock.calls.map(([value]) => value as string)
+    const full = copied.at(-1)!
+    expect(full).toContain('Preview URL:')
+    expect(full).not.toContain('Press Enter')
+    // The three independently copied code parts must reproduce the complete program.
+    expect(copied.slice(-4, -1).join('\n\n')).toBe(full)
     expect(document.body.textContent).toContain('✓ Copied')
     await act(async () => vi.advanceTimersByTime(1400))
     expect(document.body.textContent).not.toContain('✓ Copied')

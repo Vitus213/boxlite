@@ -432,7 +432,7 @@ function PrimaryBtn({ children, onClick }: { children: React.ReactNode; onClick:
   )
 }
 
-type CopyTarget = 'api-key' | 'install' | 'code' | 'creation' | 'execution'
+type CopyTarget = 'api-key' | 'install' | 'code' | 'creation' | 'execution' | 'preview'
 
 function QuickstartCode({ code, language }: { code: string; language: string }) {
   return (
@@ -486,22 +486,25 @@ function InlineCodeSteps({
           },
           {
             id: 'execution',
-            title: '4. Run code',
-            note:
-              language === 'rest'
-                ? 'Continue in the same file to send a command to your Box and check its execution status and exit code. The example removes the Box when the script exits.'
-                : 'Continue in the same file to run a command inside your Box and read its output. The example prints Hello from BoxLite, then removes the Box after execution.',
+            title: '4. Run code and commands',
+            note: 'Continue in the same file to run a command in your Box and check its result. Keep the Box running for the preview below.',
             code: parts.execution,
           },
+          {
+            id: 'preview',
+            title: '5. Create a preview',
+            note: 'Start a small web server on port 3000 and print its public preview URL. Open that URL in your browser to see Hello from BoxLite. Anyone with the URL can access this demo. The script leaves your Box running. Idle auto-stop still applies (15 minutes by default); manage it from Boxes.',
+            code: parts.preview,
+          },
         ] as const
-      ).map((part) => (
+      ).map((part, index) => (
         <section key={part.id} className="quickstart-step min-w-0">
           <QuickstartStepHeading title={part.title} />
           <p className="mt-2 max-w-[900px] font-display text-xs leading-relaxed text-muted-foreground">{part.note}</p>
           <div className="mt-4 overflow-hidden rounded-none bg-[hsl(var(--code-background))]">
             <div className="flex items-center justify-between px-4 pb-1 pt-2">
               <span className="text-label text-muted-foreground">
-                {EXAMPLE_FILES[language]} · {part.id === 'creation' ? 'part 1' : 'part 2'}
+                {EXAMPLE_FILES[language]} · part {index + 1}
               </span>
               <QuickstartCopyButton
                 quiet
@@ -711,6 +714,10 @@ function OnboardingGuideContent({
               />
             </div>
           </section>
+          <p className="font-display text-xs leading-relaxed text-muted-foreground">
+            Save parts 1–3 in order in <span className="font-mono text-foreground">{EXAMPLE_FILES[language]}</span>, or
+            use Copy full example below. Run the complete file once to create your Box and open a preview.
+          </p>
           <InlineCodeSteps
             language={language}
             apiKey={createdKey?.value}

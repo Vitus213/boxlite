@@ -4,12 +4,12 @@
     "label": "Python",
     "group": "sdk",
     "icon": "python",
-    "install": "pip install boxlite",
+    "install": "pip install boxlite==0.10.8",
     "run": "BOXLITE_API_KEY=$KEY python main.py",
     "codeLanguage": "python",
     "setupLabel": "Run in your local terminal",
     "setupDescription": "Run this command in your local development environment to install the Python library. Continue once the install finishes.",
-    "executionDescription": "What it does: uses your API key from Step 1, creates a Box, runs a command inside it, prints the output, then removes the Box.",
+    "executionDescription": "Creates a Box, runs a command, starts a web server and prints a public preview URL. The script leaves the Box running; idle auto-stop still applies.",
     "template": "python"
   },
   {
@@ -17,12 +17,12 @@
     "label": "Node",
     "group": "sdk",
     "icon": "typescript",
-    "install": "npm install @boxlite-ai/boxlite tsx",
+    "install": "npm install @boxlite-ai/boxlite@0.10.8 tsx",
     "run": "BOXLITE_API_KEY=$KEY npx tsx index.mts",
     "codeLanguage": "typescript",
     "setupLabel": "Run in your local terminal",
     "setupDescription": "Run this command in your local development environment to install the Node library. Continue once the install finishes.",
-    "executionDescription": "What it does: uses your API key from Step 1, creates a Box, runs a command inside it, prints the output, then removes the Box.",
+    "executionDescription": "Creates a Box, runs a command, starts a web server and prints a public preview URL. The script leaves the Box running; idle auto-stop still applies.",
     "template": "typescript"
   },
   {
@@ -30,12 +30,12 @@
     "label": "Go",
     "group": "sdk",
     "icon": "go",
-    "install": "go get github.com/boxlite-ai/boxlite/sdks/go\ngo run github.com/boxlite-ai/boxlite/sdks/go/cmd/setup",
+    "install": "go get github.com/boxlite-ai/boxlite/sdks/go@v0.10.8\ngo run github.com/boxlite-ai/boxlite/sdks/go/cmd/setup",
     "run": "BOXLITE_API_KEY=$KEY go run .",
     "codeLanguage": "go",
     "setupLabel": "Run in your local terminal",
     "setupDescription": "Run this command in your local development environment to install the Go library. Continue once the install finishes.",
-    "executionDescription": "What it does: uses your API key from Step 1, creates a Box, runs a command inside it, prints the output, then removes the Box.",
+    "executionDescription": "Creates a Box, runs a command, starts a web server and prints a public preview URL. The script leaves the Box running; idle auto-stop still applies.",
     "template": "go"
   },
   {
@@ -43,12 +43,12 @@
     "label": "Rust",
     "group": "sdk",
     "icon": "rust",
-    "install": "cargo add boxlite --features rest\ncargo add tokio --features macros,rt-multi-thread\ncargo add futures",
+    "install": "cargo add boxlite@=0.10.8 --features rest\ncargo add tokio --features macros,rt-multi-thread\ncargo add futures",
     "run": "BOXLITE_API_KEY=$KEY cargo run",
     "codeLanguage": "rust",
     "setupLabel": "Run in your local terminal",
     "setupDescription": "Run this command in your local development environment to install the Rust library. Continue once the install finishes.",
-    "executionDescription": "What it does: uses your API key from Step 1, creates a Box, runs a command inside it, prints the output, then removes the Box.",
+    "executionDescription": "Creates a Box, runs a command, starts a web server and prints a public preview URL. The script leaves the Box running; idle auto-stop still applies.",
     "template": "rust"
   },
   {
@@ -61,7 +61,7 @@
     "codeLanguage": "c",
     "setupLabel": "Download C SDK",
     "setupDescription": "Downloads the prebuilt C header and native library. The next step includes boxlite.h and links libboxlite.",
-    "executionDescription": "What it does: compiles a C program that uses your API key from Step 1, creates a Box, runs a command inside it, prints stdout, then removes the Box.",
+    "executionDescription": "Creates a Box, runs a command, starts a web server and prints a public preview URL. The script leaves the Box running; idle auto-stop still applies.",
     "template": "c"
   },
   {
@@ -69,12 +69,12 @@
     "label": "CLI",
     "group": "direct",
     "icon": "terminal",
-    "install": "curl -fsSL https://sh.boxlite.ai | sh",
-    "run": "BOXLITE_API_KEY=$KEY BOXLITE_REST_URL={{REST_API_URL}} boxlite run --rm --name \"sdk-quickstart-cli-$(date +%s)\" \\\n  ghcr.io/boxlite-ai/boxlite-agent-base:v0.1.0 \\\n  echo \"Hello from BoxLite CLI\"",
+    "install": "curl -fsSL https://sh.boxlite.ai | sh\ncommand -v jq",
+    "run": "BOXLITE_API_KEY=$KEY bash quickstart.sh",
     "codeLanguage": "bash",
     "setupLabel": "Install CLI",
-    "setupDescription": "Installs the boxlite command. The next step uses it directly with BOXLITE_API_KEY and BOXLITE_REST_URL.",
-    "executionDescription": "What it does: sets the API key and REST URL for one boxlite run, runs a command in a disposable Box, then removes it.",
+    "setupDescription": "Installs the boxlite command and checks jq. The example uses curl and jq to discover your organization before creating a Box.",
+    "executionDescription": "Creates a Box, runs a command, starts a web server and prints a public preview URL. The script leaves the Box running; idle auto-stop still applies.",
     "template": "cli"
   },
   {
@@ -87,7 +87,7 @@
     "codeLanguage": "bash",
     "setupLabel": "Check REST tools",
     "setupDescription": "REST does not require an SDK install. The next step uses curl and jq to create a Box and execute a command. OpenAPI is available for full endpoint reference and generated clients.",
-    "executionDescription": "What it does: uses your API key from Step 1, calls the REST API to create and start a Box, executes a command, prints execution status, then removes the Box.",
+    "executionDescription": "Creates a Box, runs a command, starts a web server and prints a public preview URL. The script leaves the Box running; idle auto-stop still applies.",
     "template": "rest"
   }
 ]

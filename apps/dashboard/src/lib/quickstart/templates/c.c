@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <stdatomic.h>
 
 typedef struct {
     CBoxliteRuntime *runtime;
@@ -18,7 +19,7 @@ typedef struct {
 
 typedef struct {
     CBoxliteRuntime *runtime;
-    volatile int stop;
+    atomic_int stop;
 } DrainLoop;
 
 static int has_error(const CBoxliteError *error) {
@@ -117,6 +118,7 @@ static void on_stdout(const uint8_t *data, size_t len, void *user_data) {
 }
 
 int main(void) {
+    setbuf(stdout, NULL);
     const char *api_key = {{API_KEY_C}};
     const char *api_url = getenv("BOXLITE_REST_URL");
     if (!api_key) {
@@ -163,6 +165,7 @@ int main(void) {
     char box_name[64];
     snprintf(box_name, sizeof(box_name), "sdk-quickstart-c-%ld", (long)time(NULL));
     boxlite_options_set_name(box_options, box_name);
+    boxlite_options_set_network_inbound_enabled(box_options);
     prepare_wait(&qs);
     require_ok(
         boxlite_create_box(qs.runtime, box_options, on_create, &qs, &error),
@@ -171,10 +174,14 @@ int main(void) {
     );
     wait_until_done(&qs);
 
+    char *created_id = boxlite_box_id(qs.box);
+    printf("Created Box: %s\n", created_id);
+    boxlite_free_string(created_id);
     prepare_wait(&qs);
     require_ok(boxlite_start_box(qs.box, on_done, &qs, &error), "start box", &error);
     wait_until_done(&qs);
 
+{{STEP_EXECUTION}}
     const char *args[] = { {{C_ARGUMENTS}} };
     BoxliteCommand cmd = {.command = {{COMMAND_LITERAL}}, .args = args, .argc = {{ARGUMENT_COUNT}}};
     require_ok(boxlite_box_exec(qs.box, &cmd, &qs.exec, &error), "exec", &error);
@@ -188,17 +195,32 @@ int main(void) {
     require_ok(boxlite_execution_wait(qs.exec, on_wait, &qs, &error), "wait", &error);
     wait_until_done(&qs);
     printf("Exit code: %d\n", qs.exit_code);
+    if (qs.exit_code != 0) exit(qs.exit_code);
 
-    char *box_id = boxlite_box_id(qs.box);
+{{STEP_PREVIEW}}
+    boxlite_execution_free(qs.exec);
+    qs.exec = NULL;
+    const char *server_code = {{SERVER_C}};
+    // Detach the server so freeing local SDK handles leaves it running.
+    const char *server_args[] = {"-c",
+        "nohup python3 -u -c \"$1\" >/tmp/preview.log 2>&1 </dev/null &", "sh", server_code};
+    BoxliteCommand server_cmd = {.command = "sh", .args = server_args, .argc = 4};
+    require_ok(boxlite_box_exec(qs.box, &server_cmd, &qs.exec, &error), "start server", &error);
     prepare_wait(&qs);
-    require_ok(
-        boxlite_remove(qs.runtime, box_id, 1, on_done, &qs, &error),
-        "remove box",
-        &error
-    );
+    require_ok(boxlite_execution_wait(qs.exec, on_wait, &qs, &error), "server launch", &error);
     wait_until_done(&qs);
-    boxlite_free_string(box_id);
-
+    if (qs.exit_code != 0) exit(qs.exit_code);
+    CBoxNetworkHandle *network = NULL;
+    CBoxTunnelHandle *preview = NULL;
+    char *url = NULL;
+    require_ok(boxlite_box_network(qs.box, &network, &error), "network", &error);
+    require_ok(boxlite_network_tunnel(network, 3000, &preview, &error), "preview", &error);
+    require_ok(boxlite_tunnel_uri(preview, &url, &error), "preview URL", &error);
+    if (!url) { fprintf(stderr, "Cloud did not return a preview URL\n"); exit(1); }
+    printf("Preview URL: %s\n", url);
+    boxlite_free_string(url);
+    boxlite_tunnel_free(preview);
+    boxlite_network_free(network);
     loop.stop = 1;
     pthread_join(drain_thread, NULL);
     boxlite_execution_free(qs.exec);

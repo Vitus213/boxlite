@@ -67,3 +67,49 @@ SDK guide state is keyed by authenticated user and organization. Switching eithe
 Automatic Welcome navigation applies only to organization owners, who can save the organization name and intent. Members can still explicitly open Quickstart. A completed Welcome flow is restored from progress scoped to the current user and organization in the same browser, including completion through “Continue without credits”; restoration does not claim that credits were granted. This browser completion timestamp is not synchronized across devices.
 
 A prompt copy confirmation and its retries stay bound to the handoff that actually reached the clipboard. Editing the request invalidates that confirmation state, so a delayed failure from an older copy cannot expose a retry for a newly prepared prompt.
+
+### SDK Quickstart previews
+
+The SDK/CLI path continues from running a command to serving a small HTTP page
+on port 3000. Python, Node, Go, Rust, C, CLI and REST all use the same three-part
+program: create a Box with inbound networking enabled, execute a command, then
+start a Python HTTP server in the guest and print its public preview URL.
+The URL is public and does not require the API key. The script exits without
+stopping or deleting the Box; users manage their resources in Boxes. Cloud idle
+auto-stop still applies (15 minutes by default), so the URL is not guaranteed
+to remain available indefinitely.
+
+Save the three displayed parts in order in the named file, or use **Copy full
+example**, then run the file once. Each section and the full example come from
+the same template. The server source is included in the program, so users do
+not need a second file or additional guest packages. SDK install commands pin
+version 0.10.8. CLI and REST discover the organization route through `/v1/me`;
+these examples require curl and jq. Piped API keys bypass terminal echo controls;
+an empty CLI tunnel response fails instead of printing an unusable preview URL.
+
+Templates live in `src/lib/quickstart/templates`. Explicit step markers delimit
+creation, execution and preview. Keep the Box and server running after the
+local program exits. Dev acceptance tests should check the public page after
+process exit, then remove only their own test resources independently.
+
+#### Preview walkthrough screenshots
+
+These captures use local fixtures without a real API key. Select **Deploy from
+SDK / CLI**, choose a language, then scroll to **Create a preview**. Copy the
+complete example and run it locally; open the printed URL in a browser.
+
+Before, the command example deleted its Box immediately:
+
+![Previous command-only flow](docs/quickstart-preview/before.png)
+
+The updated guide preserves the language selector and introduces three code parts:
+
+![SDK Quickstart overview](docs/quickstart-preview/after-overview.png)
+
+The final part prints a public URL and leaves the Box running:
+
+![Create a preview](docs/quickstart-preview/after-preview.png)
+
+Template validation rejects unknown template references and missing step sections
+before returning copyable code. Boundary tests exercise both failures using the
+real registry and template assets, preventing incomplete programs from reaching users.
