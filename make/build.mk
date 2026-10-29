@@ -30,7 +30,7 @@ runtime:
 runtime\:debug:
 	@bash $(SCRIPT_DIR)/build/build-runtime.sh --profile debug
 
-cli: runtime\:debug
+cli: $(if $(SETUP_DONE),,runtime\:debug)
 	@echo "🔨 Building boxlite CLI..."
 	@cargo build -p boxlite-cli
 	@echo "✅ CLI built: ./target/debug/boxlite"

@@ -19,6 +19,7 @@ from images import default_image
 
 REPO = Path(__file__).resolve().parents[3]
 NODE_SDK = REPO / "sdks/node"
+TSX = str(Path(os.environ.get("BOXLITE_E2E_TSX", REPO / "apps/node_modules/.bin/tsx")))
 DRIVER = REPO / "apps/e2e/sdks/node/e2e_comprehensive.ts"
 IMAGE = default_image()
 
@@ -34,8 +35,8 @@ def _has_node_napi_build() -> bool:
 def node_env():
     if auth_context().auth != "api-key":
         pytest.skip("Node SDK E2E only supports API-key today")
-    if not shutil.which("npx"):
-        pytest.skip("npx not installed")
+    if not shutil.which(TSX):
+        pytest.fail("tsx not installed; run make test:e2e:setup")
     if not _has_node_napi_build():
         pytest.skip("Node SDK napi binding not built")
     assert DRIVER.exists(), f"{DRIVER} missing"
@@ -50,7 +51,7 @@ def node_env():
 def _run(node_env, test_name: str) -> subprocess.CompletedProcess:
     env = {**node_env, "BOXLITE_E2E_NODE_TEST": test_name}
     r = subprocess.run(
-        ["npx", "--yes", "tsx", str(DRIVER)],
+        [TSX, str(DRIVER)],
         env=env, timeout=180, capture_output=True, text=True,
         cwd=str(NODE_SDK),
     )

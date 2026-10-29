@@ -1,7 +1,7 @@
 """Node SDK REST E2E: exec, copy, error typing.
 
 Extends test_node_entry.py's smoke (create+remove) with deeper
-coverage. Each test spawns a TypeScript driver via npx tsx.
+coverage. Each test spawns a TypeScript driver via the installed tsx.
 """
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from images import default_image
 
 REPO = Path(__file__).resolve().parents[3]
 NODE_SDK = REPO / "sdks/node"
+TSX = str(Path(os.environ.get("BOXLITE_E2E_TSX", REPO / "apps/node_modules/.bin/tsx")))
 DRIVERS = REPO / "apps/e2e/sdks/node"
 IMAGE = default_image()
 
@@ -34,8 +35,8 @@ def _has_node_napi_build() -> bool:
 def node_env():
     if auth_context().auth != "api-key":
         pytest.skip("Node SDK E2E only supports API-key today")
-    if not shutil.which("npx"):
-        pytest.skip("npx not installed")
+    if not shutil.which(TSX):
+        pytest.fail("tsx not installed; run make test:e2e:setup")
     if not _has_node_napi_build():
         pytest.skip("Node SDK napi binding not built")
     ctx = auth_context()
@@ -50,7 +51,7 @@ def _run_driver(node_env, name: str) -> subprocess.CompletedProcess:
     src = DRIVERS / name
     assert src.exists(), f"{src} missing"
     return subprocess.run(
-        ["npx", "--yes", "tsx", str(src)],
+        [TSX, str(src)],
         env=node_env, timeout=180, capture_output=True, text=True,
         cwd=str(NODE_SDK),
     )

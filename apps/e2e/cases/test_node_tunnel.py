@@ -20,6 +20,7 @@ from http_frames import HalfCloseResponseLost, UnexpectedTunnelEOF
 
 REPO = Path(__file__).resolve().parents[3]
 NODE_SDK = REPO / "sdks/node"
+TSX = str(Path(os.environ.get("BOXLITE_E2E_TSX", REPO / "apps/node_modules/.bin/tsx")))
 DRIVER = REPO / "apps/e2e/sdks/node/e2e_tunnel.ts"
 TSX = REPO / "apps/node_modules/tsx/dist/cli.mjs"
 
