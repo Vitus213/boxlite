@@ -322,7 +322,7 @@ jobs:
             e2e-harness:
               - 'apps/e2e/**/!(*.md)'
               - 'apps/box-images/VERSION'
-              - 'tests/scripts/**/!(*.md)'
+              - 'tests/scripts/test_e2e_*.py'
               - 'scripts/test/rest/**/!(*.md)'
               - 'Makefile'
               - 'make/vars.mk'
