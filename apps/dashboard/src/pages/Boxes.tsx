@@ -6,7 +6,6 @@
 
 import { OrganizationSuspendedError } from '@/api/errors'
 import { StatCard } from '@/components/ascii'
-import { OnboardingGuideDialog } from '@/components/OnboardingGuideDialog'
 import { CreateBoxDialog } from '@/components/Box/CreateBoxDialog'
 import { BoxTable } from '@/components/BoxTable'
 import { Plus, Search } from '@/components/ui/icon'
@@ -40,9 +39,8 @@ import {
 import { useSelectedOrganization } from '@/hooks/useSelectedOrganization'
 import { createBulkActionToast } from '@/lib/bulk-action-toast'
 import { handleApiError } from '@/lib/error-handling'
-import { getLocalStorageItem, setLocalStorageItem } from '@/lib/local-storage'
+import { getLocalStorageItem } from '@/lib/local-storage'
 import {
-  ONBOARDING_ENTRY_HIGHLIGHT_EVENT,
   mergeOnboardingProgress,
   ONBOARDING_PROGRESS_EVENT,
   readOnboardingProgress,
@@ -75,14 +73,13 @@ const Boxes: React.FC = () => {
   const { user } = useAuth()
   const userId = user?.profile.sub
   const navigate = useNavigate()
-  const [searchParams, setSearchParams] = useSearchParams()
+  const [searchParams] = useSearchParams()
   const { notificationSocket } = useNotificationSocket()
   const config = useConfig()
   const queryClient = useQueryClient()
   const { selectedOrganization, authenticatedUserOrganizationMember, authenticatedUserHasPermission } =
     useSelectedOrganization()
   const [createBoxOpen, setCreateBoxOpen] = useState(false)
-  const [showOnboardingDialog, setShowOnboardingDialog] = useState(false)
   const [onboardingProgress, setOnboardingProgress] = useState<OnboardingProgress>(() => readOnboardingProgress(userId))
 
   const updateOnboardingProgress = useCallback(
@@ -631,26 +628,6 @@ const Boxes: React.FC = () => {
     result.successfulIds.forEach(removeBoxFromCache)
   }
 
-  const clearOnboardingUrlParam = useCallback(() => {
-    if (searchParams.get('onboarding') !== '1') {
-      return
-    }
-    const nextParams = new URLSearchParams(searchParams)
-    nextParams.delete('onboarding')
-    setSearchParams(nextParams, { replace: true })
-  }, [searchParams, setSearchParams])
-
-  const closeOnboardingDialog = useCallback(() => {
-    if (userId) {
-      setLocalStorageItem(`${LocalStorageKey.SkipOnboardingPrefix}${userId}`, 'true')
-    }
-    setShowOnboardingDialog(false)
-    window.setTimeout(() => {
-      window.dispatchEvent(new Event(ONBOARDING_ENTRY_HIGHLIGHT_EVENT))
-      clearOnboardingUrlParam()
-    }, 220)
-  }, [clearOnboardingUrlParam, userId])
-
   // Fleet stat cards — real data, independent of the table's current filter/page.
   const orgId = selectedOrganization?.id
 
@@ -700,17 +677,20 @@ const Boxes: React.FC = () => {
     if (
       shouldAutoOpenOnboarding({
         requestedByUrl,
+        canCompleteWelcome: authenticatedUserOrganizationMember?.role === OrganizationUserRoleEnum.OWNER,
         dismissedInThisBrowser: getLocalStorageItem(skipOnboardingKey) === 'true',
         accountStateLoaded: apiKeysQuery.isSuccess && totalBoxesQuery.isSuccess,
         hasApiKeys: (apiKeysQuery.data?.length ?? 0) > 0,
         hasBoxes: (totalBoxesQuery.data ?? 0) > 0,
       })
     ) {
-      setShowOnboardingDialog(true)
+      navigate(requestedByUrl ? RoutePath.QUICKSTART : RoutePath.WELCOME, { replace: true })
     }
   }, [
+    navigate,
     apiKeysQuery.data,
     apiKeysQuery.isSuccess,
+    authenticatedUserOrganizationMember?.role,
     searchParams,
     selectedOrganization,
     totalBoxesQuery.data,
@@ -724,18 +704,6 @@ const Boxes: React.FC = () => {
 
   return (
     <div className="flex h-[calc(100svh-60px)] min-h-0 flex-col px-4 pt-5 sm:px-6 lg:px-[40px] lg:pt-[26px]">
-      <OnboardingGuideDialog
-        open={showOnboardingDialog}
-        onOpenChange={(isOpen) => {
-          if (!isOpen) {
-            closeOnboardingDialog()
-          } else {
-            setShowOnboardingDialog(true)
-          }
-        }}
-        onProgressChange={updateOnboardingProgress}
-        progress={onboardingProgress}
-      />
       {/* header */}
       <div className="mb-[18px] flex items-end justify-between lg:mb-[22px]">
         <h1 className="font-display text-page font-semibold text-foreground">Boxes</h1>
@@ -772,7 +740,6 @@ const Boxes: React.FC = () => {
             onOpenChange={setCreateBoxOpen}
             onCreated={() => {
               updateOnboardingProgress({ boxCreated: true })
-              setShowOnboardingDialog(false)
             }}
           >
             <button
@@ -818,7 +785,7 @@ const Boxes: React.FC = () => {
           filters={filters}
           onFiltersChange={handleFiltersChange}
           handleRecover={handleRecover}
-          onOpenQuickstart={() => setShowOnboardingDialog(true)}
+          onOpenQuickstart={() => navigate(RoutePath.QUICKSTART)}
         />
       </div>
 

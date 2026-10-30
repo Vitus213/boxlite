@@ -78,6 +78,7 @@ docs/BoxState.md
 docs/BoxVolume.md
 docs/BoxliteConfiguration.md
 docs/ConfigApi.md
+docs/CpuIncidentListDto.md
 docs/CreateApiKey.md
 docs/CreateAttachTicket.md
 docs/CreateImageAlias.md
@@ -85,6 +86,7 @@ docs/CreateLinkedAccount.md
 docs/CreateOrganization.md
 docs/CreateOrganizationInvitation.md
 docs/CreateOrganizationRole.md
+docs/CreatePromptHandoffDto.md
 docs/CreateRegion.md
 docs/CreateRegionResponse.md
 docs/CreateRegistryCredential.md
@@ -114,6 +116,7 @@ docs/NetworkInfo.md
 docs/NetworkMode.md
 docs/ObjectStorageApi.md
 docs/OidcConfig.md
+docs/OnboardingDto.md
 docs/Organization.md
 docs/OrganizationBoxDefaultLimitedNetworkEgress.md
 docs/OrganizationInvitation.md
@@ -133,6 +136,8 @@ docs/PaginatedTraces.md
 docs/PollJobsResponse.md
 docs/PosthogConfig.md
 docs/PreviewApi.md
+docs/PromptDraftDto.md
+docs/PromptHandoffDto.md
 docs/RateLimitConfig.md
 docs/RateLimitEntry.md
 docs/RegenerateApiKeyResponse.md
@@ -143,12 +148,15 @@ docs/RegistriesApi.md
 docs/RegistryCredential.md
 docs/RegistryCredentialKind.md
 docs/Runner.md
+docs/RunnerCpuIncident.md
 docs/RunnerFull.md
 docs/RunnerHealthMetrics.md
 docs/RunnerHealthcheck.md
 docs/RunnerServiceHealth.md
 docs/RunnerState.md
 docs/RunnersApi.md
+docs/SaveOnboardingDto.md
+docs/SavePromptDraftDto.md
 docs/SendWebhookDto.md
 docs/StorageAccessDto.md
 docs/ToolboxProxyUrl.md
@@ -226,6 +234,7 @@ models/box-state.ts
 models/box-volume.ts
 models/box.ts
 models/boxlite-configuration.ts
+models/cpu-incident-list-dto.ts
 models/create-api-key.ts
 models/create-attach-ticket.ts
 models/create-image-alias.ts
@@ -233,6 +242,7 @@ models/create-linked-account.ts
 models/create-organization-invitation.ts
 models/create-organization-role.ts
 models/create-organization.ts
+models/create-prompt-handoff-dto.ts
 models/create-region-response.ts
 models/create-region.ts
 models/create-registry-credential.ts
@@ -259,6 +269,7 @@ models/metrics-response.ts
 models/network-info.ts
 models/network-mode.ts
 models/oidc-config.ts
+models/onboarding-dto.ts
 models/organization-box-default-limited-network-egress.ts
 models/organization-invitation.ts
 models/organization-referral-code.ts
@@ -276,6 +287,8 @@ models/paginated-logs.ts
 models/paginated-traces.ts
 models/poll-jobs-response.ts
 models/posthog-config.ts
+models/prompt-draft-dto.ts
+models/prompt-handoff-dto.ts
 models/rate-limit-config.ts
 models/rate-limit-entry.ts
 models/regenerate-api-key-response.ts
@@ -283,12 +296,15 @@ models/region-type.ts
 models/region.ts
 models/registry-credential-kind.ts
 models/registry-credential.ts
+models/runner-cpu-incident.ts
 models/runner-full.ts
 models/runner-health-metrics.ts
 models/runner-healthcheck.ts
 models/runner-service-health.ts
 models/runner-state.ts
 models/runner.ts
+models/save-onboarding-dto.ts
+models/save-prompt-draft-dto.ts
 models/send-webhook-dto.ts
 models/storage-access-dto.ts
 models/toolbox-proxy-url.ts

@@ -720,6 +720,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -777,9 +778,13 @@ version = "0.1.0"
 dependencies = [
  "boxlite",
  "futures",
+ "hex",
  "libc",
+ "oci-client",
  "parking_lot",
  "paste",
+ "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
 ]
@@ -3360,6 +3365,8 @@ dependencies = [
  "napi-sys",
  "nohash-hasher",
  "rustc-hash",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

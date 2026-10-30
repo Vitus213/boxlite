@@ -437,3 +437,42 @@ body {
   background-image: radial-gradient(hsl(var(--brand) / 0.5) 1px, transparent 1.6px);
   background-size: 6px 6px;
 }
+
+/* A continuous reading path through the four inline SDK steps. */
+.quickstart-sequence {
+  padding-left: 42px;
+}
+.quickstart-step {
+  position: relative;
+  padding-bottom: 36px;
+}
+.quickstart-step::before {
+  content: '';
+  position: absolute;
+  left: -29px;
+  top: 24px;
+  bottom: 0;
+  width: 1px;
+  background: hsl(var(--border));
+}
+.quickstart-step:last-of-type::before {
+  display: none;
+}
+.quickstart-step-number {
+  position: absolute;
+  left: -42px;
+  top: -4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.quickstart-step h2 {
+  position: relative;
+}

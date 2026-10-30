@@ -3,9 +3,8 @@
  * SPDX-License-Identifier: AGPL-3.0
  */
 
-import { AsciiButton, Panel, SectionTitle, SegmentedBar } from '@/components/ascii'
+import { Panel, SegmentedBar } from '@/components/ascii'
 import { CreateBoxDialog } from '@/components/Box/CreateBoxDialog'
-import { UseImageSheet } from '@/components/images/UseImageSheet'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -25,6 +24,8 @@ import { useSelectedOrganization } from '@/hooks/useSelectedOrganization'
 import { handleApiError } from '@/lib/error-handling'
 import { formatBytes, timeAgo } from '@/lib/format'
 import { conflictBoxIds, imageRouteKey, imageStartRef } from '@/lib/image-ref'
+import { BOX_TEMPLATES } from '@/lib/quickstart/box-templates'
+import { TemplateIcon } from '@/components/first-run/TemplateIcon'
 import { cn } from '@/lib/utils'
 import { BoxliteError } from '@/api/errors'
 import { Box, Image, OrganizationRolePermissionsEnum } from '@boxlite-ai/api-client'
@@ -55,14 +56,7 @@ function BoxLinks({ boxes }: { boxes: Box[] }) {
   )
 }
 
-/**
- * The organization's images.
- *
- * There is no "add image": an image enters the list by being used, so the
- * primary action is the create call itself. Built-in images sit apart from
- * the table because none of its columns apply to them — they are operator
- * configuration, with no versions, size or last start recorded.
- */
+/** Public templates and organization images share one searchable list. */
 export function ImageCatalog() {
   const navigate = useNavigate()
   const { selectedOrganization, authenticatedUserHasPermission } = useSelectedOrganization()
@@ -76,9 +70,8 @@ export function ImageCatalog() {
   const canCreateBox = authenticatedUserHasPermission(OrganizationRolePermissionsEnum.WRITE_BOXES)
 
   const [filter, setFilter] = useState('')
-  const [pendingRemove, setPendingRemove] = useState<Image | null>(null)
+  const [pendingRemove, setPendingRemove] = useState<(Image & { templateId?: string }) | null>(null)
   const [newBoxImage, setNewBoxImage] = useState<string | null>(null)
-  const [codeRef, setCodeRef] = useState<string | null>(null)
 
   useEffect(() => {
     if (imagesError) handleApiError(imagesError, 'Failed to fetch images')
@@ -88,16 +81,43 @@ export function ImageCatalog() {
     if (usageError) handleApiError(usageError, 'Failed to fetch image usage')
   }, [usageError])
 
-  const own = useMemo(() => images.filter((image) => !image.curated), [images])
-  const builtIn = useMemo(() => images.filter((image) => image.curated), [images])
-
+  const catalog = useMemo(() => {
+    const rows: (Image & { templateId?: string })[] = images.map((image) => ({
+      ...image,
+      templateId: BOX_TEMPLATES.find((template) =>
+        image.curatedRef
+          ? template.image === image.curatedRef
+          : [imageStartRef(image), ...image.aliases.map((tag) => `${image.name}:${tag}`)].includes(template.image),
+      )?.id,
+    }))
+    for (const template of BOX_TEMPLATES) {
+      if (rows.some((image) => image.templateId === template.id)) continue
+      rows.push({
+        id: null,
+        name: template.name,
+        curated: true,
+        curatedRef: template.image,
+        aliases: [],
+        versionCount: 0,
+        sizeBytes: null,
+        lastUsedAt: null,
+        createdAt: null,
+        templateId: template.id,
+      })
+    }
+    return rows
+  }, [images])
   const rows = useMemo(() => {
     const needle = filter.trim().toLowerCase()
-    if (!needle) return own
-    return own.filter((image) => image.name.toLowerCase().includes(needle))
-  }, [own, filter])
+    return catalog.filter((image) =>
+      `${image.name} ${image.curatedRef ?? ''} ${image.aliases.join(' ')}`.toLowerCase().includes(needle),
+    )
+  }, [catalog, filter])
+  const openTemplate = (id: string) =>
+    navigate(`${RoutePath.QUICKSTART}?method=console&template=${encodeURIComponent(id)}`)
 
-  const handleRemove = async (image: Image) => {
+  const handleRemove = async (image: Image & { templateId?: string }) => {
+    if (image.curated || !image.id) return
     const key = imageRouteKey(image)
     setPendingRemove(null)
     try {
@@ -159,14 +179,14 @@ export function ImageCatalog() {
         </li>
         <li aria-hidden>→</li>
         <li>
-          <span className="text-foreground">3</span> It is listed here once the box runs
+          <span className="text-foreground">3</span> Used images count toward your image limit
         </li>
       </ol>
 
       {usage && (
         <Panel className={cn('mb-[14px] px-[14px] py-[12px]', atLimit && 'border-destructive')}>
           <div className="flex flex-wrap items-center gap-4">
-            <SegmentedBar used={usage.count} limit={usage.limit} />
+            <SegmentedBar used={usage.count} limit={usage.limit} segments={usage.limit} />
             <span
               className={cn(
                 'whitespace-nowrap font-mono text-meta tabular-nums',
@@ -197,7 +217,7 @@ export function ImageCatalog() {
 
       <div className="mt-[14px] flex min-h-0 flex-1 flex-col overflow-y-auto">
         <div
-          className={cn(ROW_GRID, 'border-b border-border pb-2 font-mono text-label uppercase text-muted-foreground')}
+          className={cn(ROW_GRID, 'border-b border-border py-2 font-mono text-label uppercase text-muted-foreground')}
         >
           <span>Image</span>
           <span>Tags</span>
@@ -210,15 +230,21 @@ export function ImageCatalog() {
         </div>
 
         {rows.map((image) => {
-          const key = imageRouteKey(image)
+          const key = image.id ?? image.curatedRef ?? image.name
           const boxes = byImage.get(image.name) ?? []
           return (
             <div key={key} className={cn(ROW_GRID, 'border-b border-border/60 py-[13px] text-body')}>
               <button
                 type="button"
-                onClick={() => navigate(generatePath(RoutePath.IMAGE_DETAILS, { idOrRef: key }))}
-                className="min-w-0 text-left"
+                onClick={() =>
+                  image.templateId && !image.id
+                    ? openTemplate(image.templateId)
+                    : navigate(generatePath(RoutePath.IMAGE_DETAILS, { idOrRef: imageRouteKey(image) }))
+                }
+                className="flex min-w-0 items-center gap-3 text-left"
+                title={image.curatedRef ?? image.name}
               >
+                <TemplateIcon id={image.templateId ?? image.name} />
                 <span className="block truncate font-mono font-medium text-foreground hover:underline">
                   {image.name}
                 </span>
@@ -241,14 +267,16 @@ export function ImageCatalog() {
                 {canCreateBox && (
                   <button
                     type="button"
-                    onClick={() => setNewBoxImage(imageStartRef(image))}
+                    onClick={() =>
+                      image.templateId ? openTemplate(image.templateId) : setNewBoxImage(imageStartRef(image))
+                    }
                     title={`New box from ${imageStartRef(image)}`}
                     className="px-2 py-[5px] font-mono text-label uppercase text-muted-foreground transition-colors hover:text-foreground"
                   >
                     New box
                   </button>
                 )}
-                {canDelete && (
+                {canDelete && !image.curated && image.id && (
                   <button
                     type="button"
                     onClick={() => setPendingRemove(image)}
@@ -267,29 +295,6 @@ export function ImageCatalog() {
           )
         })}
 
-        {own.length === 0 && !filter.trim() && (
-          <div className="flex flex-col items-center gap-4 py-10 text-center">
-            <p className="font-mono text-meta text-muted-foreground">
-              No images yet. Start a box from any public image and it appears here.
-            </p>
-            <div className="flex items-center gap-3">
-              {canCreateBox && (
-                <AsciiButton variant="primary" onClick={() => setNewBoxImage('python:3.12-slim')}>
-                  New box
-                </AsciiButton>
-              )}
-              <AsciiButton onClick={() => setCodeRef('python:3.12-slim')}>Show the SDK call</AsciiButton>
-            </div>
-            <p className="font-mono text-meta text-muted-foreground">
-              Private image?{' '}
-              <Link to={RoutePath.IMAGE_REGISTRIES} className="text-foreground underline-offset-4 hover:underline">
-                Connect a private registry
-              </Link>
-              .
-            </p>
-          </div>
-        )}
-
         {rows.length === 0 && filter.trim() && (
           <div className="flex flex-col items-center gap-3 py-10 text-center font-mono text-meta text-muted-foreground">
             <span>No image matches “{filter.trim()}”</span>
@@ -302,36 +307,6 @@ export function ImageCatalog() {
             </button>
           </div>
         )}
-
-        {builtIn.length > 0 && (
-          <div className="mt-[26px]">
-            <SectionTitle title="Built-in" count="maintained by BoxLite · free · not counted" />
-            <div className="flex flex-wrap gap-2 px-[2px]">
-              {builtIn.map((image) => (
-                <div key={image.name} className="flex items-center border border-border bg-card">
-                  <button
-                    type="button"
-                    onClick={() => navigate(generatePath(RoutePath.IMAGE_DETAILS, { idOrRef: image.name }))}
-                    title={image.curatedRef ?? undefined}
-                    className="px-3 py-[7px] font-mono text-meta font-medium text-foreground hover:underline"
-                  >
-                    {image.name}
-                  </button>
-                  {canCreateBox && (
-                    <button
-                      type="button"
-                      onClick={() => setNewBoxImage(imageStartRef(image))}
-                      title={`New box from ${image.name}`}
-                      className="border-l border-border px-2 py-[7px] font-mono text-label uppercase text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                      New box
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
 
       <CreateBoxDialog
@@ -339,7 +314,6 @@ export function ImageCatalog() {
         onOpenChange={(open) => !open && setNewBoxImage(null)}
         prefillImage={newBoxImage ?? undefined}
       />
-      <UseImageSheet imageRef={codeRef} onClose={() => setCodeRef(null)} />
 
       <AlertDialog open={!!pendingRemove} onOpenChange={(open) => !open && setPendingRemove(null)}>
         <AlertDialogContent>

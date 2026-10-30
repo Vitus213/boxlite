@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: AGPL-3.0
  */
 
+import { OnboardingController } from './controllers/onboarding.controller'
+import { OnboardingService } from './services/onboarding.service'
+import { QuickstartPromptDraft, QuickstartPromptHandoff } from './entities/quickstart-prompt.entity'
 import { Module } from '@nestjs/common'
 import { TypeOrmModule } from '@nestjs/typeorm'
 import { OrganizationController } from './controllers/organization.controller'
@@ -39,6 +42,8 @@ import { UsageController } from '../usage/controllers/usage.controller'
     RegionModule,
     TypeOrmModule.forFeature([
       Organization,
+      QuickstartPromptDraft,
+      QuickstartPromptHandoff,
       OrganizationRole,
       OrganizationUser,
       OrganizationInvitation,
@@ -50,6 +55,7 @@ import { UsageController } from '../usage/controllers/usage.controller'
     UsageModule,
   ],
   controllers: [
+    OnboardingController,
     OrganizationController,
     OrganizationRoleController,
     OrganizationUserController,
@@ -58,6 +64,7 @@ import { UsageController } from '../usage/controllers/usage.controller'
     UsageController,
   ],
   providers: [
+    OnboardingService,
     OrganizationService,
     OrganizationRoleService,
     OrganizationUserService,

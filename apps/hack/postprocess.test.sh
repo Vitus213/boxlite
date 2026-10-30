@@ -43,7 +43,9 @@ check() { # desc  condition-already-evaluated($?)
 
 ts_fixture() { # dir  [with-user-agent]
   local dir="$1" with_ua="${2:-no}" ua_line=""
-  mkdir -p "$dir/api" "$dir/docs"
+  mkdir -p "$dir/api" "$dir/docs" "$dir/models"
+  printf "export interface OnboardingDto { 'submittedAt': Date; }\n" > "$dir/models/onboarding-dto.ts"
+  printf "export interface BoxDto { 'createdAt': Date; }\n" > "$dir/models/box-dto.ts"
   [[ "$with_ua" == "with-user-agent" ]] &&
     ua_line="                'User-Agent': \`stale/0.0.0\`,
 "
@@ -102,6 +104,10 @@ ts_dir="$TMP_ROOT/ts-insert"
 ts_fixture "$ts_dir"
 node "$HACK_DIR/ts-client/postprocess.mjs" "$ts_dir" my-client > /dev/null 2>&1
 check "TS: exits 0 on generator output" $?
+grep -q "'submittedAt': string" "$ts_dir/models/onboarding-dto.ts"
+check "TS: onboarding timestamp matches the JSON string runtime" $?
+grep -q "'createdAt': Date" "$ts_dir/models/box-dto.ts"
+check "TS: unrelated timestamp contracts are unchanged" $?
 
 grep -q "^import \* as packageJson from '../package.json';$" "$ts_dir/configuration.ts"
 check "TS: version import inserted" $?

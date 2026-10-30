@@ -22,6 +22,7 @@ var _ MappedNullable = &Organization{}
 
 // Organization struct for Organization
 type Organization struct {
+	Onboarding NullableOnboardingDto `json:"onboarding,omitempty"`
 	// Organization ID
 	Id string `json:"id"`
 	// Organization name
@@ -114,6 +115,48 @@ func NewOrganization(id string, name string, createdBy string, isDefaultForAuthe
 func NewOrganizationWithDefaults() *Organization {
 	this := Organization{}
 	return &this
+}
+
+// GetOnboarding returns the Onboarding field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *Organization) GetOnboarding() OnboardingDto {
+	if o == nil || IsNil(o.Onboarding.Get()) {
+		var ret OnboardingDto
+		return ret
+	}
+	return *o.Onboarding.Get()
+}
+
+// GetOnboardingOk returns a tuple with the Onboarding field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Organization) GetOnboardingOk() (*OnboardingDto, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Onboarding.Get(), o.Onboarding.IsSet()
+}
+
+// HasOnboarding returns a boolean if a field has been set.
+func (o *Organization) HasOnboarding() bool {
+	if o != nil && o.Onboarding.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetOnboarding gets a reference to the given NullableOnboardingDto and assigns it to the Onboarding field.
+func (o *Organization) SetOnboarding(v OnboardingDto) {
+	o.Onboarding.Set(&v)
+}
+// SetOnboardingNil sets the value for Onboarding to be an explicit nil
+func (o *Organization) SetOnboardingNil() {
+	o.Onboarding.Set(nil)
+}
+
+// UnsetOnboarding ensures that no value is present for Onboarding, not even an explicit nil
+func (o *Organization) UnsetOnboarding() {
+	o.Onboarding.Unset()
 }
 
 // GetId returns the Id field value
@@ -725,6 +768,9 @@ func (o Organization) MarshalJSON() ([]byte, error) {
 
 func (o Organization) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if o.Onboarding.IsSet() {
+		toSerialize["onboarding"] = o.Onboarding.Get()
+	}
 	toSerialize["id"] = o.Id
 	toSerialize["name"] = o.Name
 	toSerialize["createdBy"] = o.CreatedBy
@@ -816,6 +862,7 @@ func (o *Organization) UnmarshalJSON(data []byte) (err error) {
 	additionalProperties := make(map[string]interface{})
 
 	if err = json.Unmarshal(data, &additionalProperties); err == nil {
+		delete(additionalProperties, "onboarding")
 		delete(additionalProperties, "id")
 		delete(additionalProperties, "name")
 		delete(additionalProperties, "createdBy")

@@ -14,6 +14,7 @@ interface CodeBlockProps {
   code: string
   language: string
   showCopy?: boolean
+  preserveWhitespace?: boolean
   codeAreaClassName?: string
   className?: string
 }
@@ -105,26 +106,33 @@ function registerBashGrammar() {
 
 registerBashGrammar()
 
-const CodeBlock: React.FC<CodeBlockProps> = ({ code, language, showCopy = true, codeAreaClassName, className }) => {
+const CodeBlock: React.FC<CodeBlockProps> = ({
+  code,
+  language,
+  showCopy = true,
+  preserveWhitespace = false,
+  codeAreaClassName,
+  className,
+}) => {
   const { resolvedTheme } = useTheme()
   const highlightLanguage = languageAliases[language] ?? language
 
   return (
     <div
       className={cn(
-        'relative min-w-0 max-w-full overflow-hidden rounded-lg border border-border/80 bg-[hsl(var(--code-background))] shadow-sm dark:border-white/10',
+        'relative min-w-0 max-w-full overflow-hidden rounded-none border border-border/80 bg-[hsl(var(--code-background))] shadow-sm dark:border-white/10',
         className,
       )}
     >
       <Highlight
         theme={(resolvedTheme === 'dark' ? oneDark : oneLight) as PrismTheme}
-        code={code.trim()}
+        code={preserveWhitespace ? code : code.trim()}
         language={highlightLanguage}
       >
         {({ style, tokens, getLineProps, getTokenProps }: HighlightProps) => (
           <pre
             className={cn(
-              'scrollbar-elevated overflow-x-auto rounded-lg p-4 pr-12 text-[13px] leading-6',
+              'scrollbar-elevated overflow-x-auto rounded-none p-4 pr-12 text-body leading-6',
               codeAreaClassName,
             )}
             style={style}
@@ -147,7 +155,7 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ code, language, showCopy = true, 
       </Highlight>
       {showCopy && (
         <CopyButton
-          value={code.trim()}
+          value={preserveWhitespace ? code : code.trim()}
           variant="ghost"
           className="absolute right-2 top-2.5 bg-background/80 p-2 text-muted-foreground shadow-sm ring-1 ring-border/70 backdrop-blur hover:bg-muted hover:text-foreground"
         />

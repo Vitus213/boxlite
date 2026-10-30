@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0
  */
 
+import type { FirstRunUseCase } from '@/lib/first-run'
 import { BillingApiClient } from '@/billing-api/billingApiClient'
 import { DashboardConfig } from '@/types/DashboardConfig'
 import {
@@ -72,7 +73,55 @@ function clearReauthAttempted(): void {
 // Prefer bash when the image has it; every image has sh.
 const LOGIN_SHELL = 'if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi'
 
+export interface OrganizationOnboarding {
+  useCase: FirstRunUseCase
+  note: string
+  submittedBy: string
+  submittedAt: string
+}
+export interface PromptDraft {
+  text: string
+  revision: number
+  updatedAt: string
+}
 export class ApiClient {
+  public async getOrganizationOnboarding(org: string): Promise<OrganizationOnboarding | null> {
+    return (await this.http.get(`/organizations/${encodeURIComponent(org)}/onboarding`, this.v1Config())).data
+  }
+  public async saveOrganizationOnboarding(org: string, value: Pick<OrganizationOnboarding, 'useCase' | 'note'>) {
+    return (await this.http.put(`/organizations/${encodeURIComponent(org)}/onboarding`, value, this.v1Config())).data
+  }
+  public async getPromptDraft(org: string): Promise<PromptDraft | null> {
+    return (await this.http.get(`/organizations/${encodeURIComponent(org)}/quickstart/prompt`, this.v1Config())).data
+  }
+  public async savePromptDraft(org: string, text: string, revision: number): Promise<PromptDraft> {
+    return (
+      await this.http.put(
+        `/organizations/${encodeURIComponent(org)}/quickstart/prompt`,
+        { text, revision },
+        this.v1Config(),
+      )
+    ).data
+  }
+  public async preparePromptHandoff(org: string, text: string, requestId: string) {
+    return (
+      await this.http.post(
+        `/organizations/${encodeURIComponent(org)}/quickstart/handoffs`,
+        { text, requestId },
+        this.v1Config(),
+      )
+    ).data
+  }
+  public async markPromptCopied(org: string, requestId: string) {
+    return (
+      await this.http.patch(
+        `/organizations/${encodeURIComponent(org)}/quickstart/handoffs/${encodeURIComponent(requestId)}/copied`,
+        {},
+        this.v1Config(),
+      )
+    ).data
+  }
+
   private config: Configuration
   private http: AxiosInstance
   private onUnauthorized?: () => Promise<void> | void

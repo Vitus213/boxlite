@@ -44,6 +44,10 @@ const Keys = React.lazy(() => import('./pages/Keys'))
 const Billing = React.lazy(() => import('./pages/Billing'))
 const BillingPlanChange = React.lazy(() => import('./pages/BillingPlanChange'))
 const Volumes = React.lazy(() => import('./pages/Volumes'))
+const FirstBoxWelcome = React.lazy(() => import('./components/first-run/FirstBoxWelcome'))
+const FirstBoxQuickstart = React.lazy(() =>
+  import('./components/first-run/FirstBoxOnboarding').then((m) => ({ default: m.FirstBoxQuickstart })),
+)
 const Images = React.lazy(() => import('./pages/ImagesPage'))
 const ImageDetails = React.lazy(() => import('./pages/ImageDetails'))
 const EmailVerify = React.lazy(() => import('./pages/EmailVerify'))
@@ -178,6 +182,8 @@ function App() {
         <Route index element={<Navigate to={boxesRedirect} replace />} />
         <Route path={getRouteSubPath(RoutePath.KEYS)} element={<Keys />} />
         <Route path={getRouteSubPath(RoutePath.BOXES)} element={<Boxes />} />
+        <Route path={getRouteSubPath(RoutePath.WELCOME)} element={<FirstBoxWelcome />} />
+        <Route path={getRouteSubPath(RoutePath.QUICKSTART)} element={<FirstBoxQuickstart />} />
         <Route path={getRouteSubPath(RoutePath.VOLUMES)} element={<Volumes />} />
         <Route path={getRouteSubPath(RoutePath.IMAGES)} element={<Images tab="images" />} />
         {/* The static segment is declared before `:idOrRef`, as the API orders its routes. */}
@@ -229,10 +235,7 @@ function App() {
           element={<Navigate to={`${RoutePath.SETTINGS}?tab=member`} replace />}
         />
         <Route path={getRouteSubPath(RoutePath.USER_INVITATIONS)} element={<UserOrganizationInvitations />} />
-        <Route
-          path={getRouteSubPath(RoutePath.ONBOARDING)}
-          element={<Navigate to={`${RoutePath.BOXES}?onboarding=1`} replace />}
-        />
+        <Route path={getRouteSubPath(RoutePath.ONBOARDING)} element={<Navigate to={RoutePath.QUICKSTART} replace />} />
       </Route>
       <Route path="*" element={<NotFound />} />
     </Routes>

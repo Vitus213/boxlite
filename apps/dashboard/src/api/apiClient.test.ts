@@ -6,13 +6,19 @@ const config = { apiUrl: 'http://api.test/api' } as never
 // Fresh module per test so the module-level `isHandlingUnauthorized` guard
 // doesn't leak across cases. A custom axios adapter makes every request resolve
 // to `status` with an empty body, so the response interceptor sees the 401.
-async function makeClient(onUnauthorized: () => Promise<void> | void, status = 401, body: unknown = {}) {
+async function makeClient(
+  onUnauthorized: () => Promise<void> | void,
+  status = 401,
+  body: unknown = {},
+  requests: any[] = [],
+) {
   vi.resetModules()
   const axios = (await import('axios')).default
   // A custom adapter must settle the response itself (axios doesn't re-apply
   // validateStatus to a custom adapter's return), so reject non-2xx with an
   // AxiosError carrying `.response`, exactly like the built-in adapters.
   axios.defaults.adapter = (async (cfg: unknown) => {
+    requests.push(cfg)
     const response = { data: body, status, statusText: '', headers: {}, config: cfg }
     if (status >= 200 && status < 300) return response
     const err = new Error(`Request failed with status code ${status}`) as Error & Record<string, unknown>
@@ -214,4 +220,27 @@ describe('ApiClient terminal session', () => {
     expect(requests[0].method).toBe('delete')
     expect(requests[0].url).toBe('/v1/org-1/boxes/box-1/executions/exec-1')
   })
+})
+
+it('sends organization-scoped onboarding requests with revisions and no generated credentials', async () => {
+  const requests: any[] = []
+  const result = { text: 'Build a dashboard', revision: 2 }
+  const api = await makeClient(vi.fn(), 200, result, requests)
+  await expect(api.getOrganizationOnboarding('org/one')).resolves.toEqual(result)
+  await api.saveOrganizationOnboarding('org/one', { useCase: 'long-running-agent', note: 'Nightly jobs' })
+  await api.getPromptDraft('org/one')
+  await expect(api.savePromptDraft('org/one', 'Build a dashboard', 1)).resolves.toEqual(result)
+  await api.preparePromptHandoff('org/one', 'Build a dashboard', 'request-1')
+  await api.markPromptCopied('org/one', 'request/1')
+  expect(requests.map(({ method, url }) => [method, url])).toEqual([
+    ['get', '/organizations/org%2Fone/onboarding'],
+    ['put', '/organizations/org%2Fone/onboarding'],
+    ['get', '/organizations/org%2Fone/quickstart/prompt'],
+    ['put', '/organizations/org%2Fone/quickstart/prompt'],
+    ['post', '/organizations/org%2Fone/quickstart/handoffs'],
+    ['patch', '/organizations/org%2Fone/quickstart/handoffs/request%2F1/copied'],
+  ])
+  expect(JSON.parse(requests[3].data)).toEqual({ text: 'Build a dashboard', revision: 1 })
+  expect(JSON.parse(requests[4].data)).toEqual({ text: 'Build a dashboard', requestId: 'request-1' })
+  expect(requests.every((r) => r.baseURL === 'http://api.test/api')).toBe(true)
 })

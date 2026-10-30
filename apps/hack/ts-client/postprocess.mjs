@@ -129,4 +129,20 @@ if (existsSync(docsDir)) {
   }
 }
 
+// Axios exposes ISO date-time strings. Keep this mapping local to the new
+// onboarding contracts; other generated model timestamp contracts stay intact.
+for (const [model, fields] of Object.entries({
+  'onboarding-dto': ['submittedAt'],
+  'prompt-draft-dto': ['updatedAt'],
+  'prompt-handoff-dto': ['createdAt', 'copiedAt'],
+})) {
+  const modelPath = `${srcDir}/models/${model}.ts`
+  if (!existsSync(modelPath)) continue
+  let source = readFileSync(modelPath, 'utf8')
+  for (const field of fields) {
+    source = source.replace(new RegExp(`('${field}'\\??: )Date`, 'g'), '$1string')
+  }
+  writeFileSync(modelPath, source)
+}
+
 console.log(`Postprocessed TypeScript client at ${srcDir}`)

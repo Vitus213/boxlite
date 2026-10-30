@@ -61,7 +61,12 @@ online runner, `start` stops it and boots it again with a new token.
   PRs re-run on every push while labeled; a fork PR runs only the head commit that was
   labeled — after new pushes, remove and re-add the label to approve the new code.
 - Manual `workflow_dispatch`, with an optional `debug` input that opens an SSH session if the
-  tests fail. A dispatch runs the selected branch's workflow, which is how a change to this
+  tests fail, and a `registries` input: `local` (the default, and what every push and labeled
+  PR uses) replays images from the
+  [local registry](../../../src/boxlite/tests/README.md#test_registries--the-local-registry);
+  `upstream` pulls from the public mirrors, as the suites did before it, e.g.
+  `gh workflow run e2e-local.yml -f registries=upstream`.
+  A dispatch runs the selected branch's workflow, which is how a change to this
   workflow is tested before it merges.
 
 ## VM & auth
@@ -154,6 +159,7 @@ gh workflow run e2e-local.yml
 | `start-runner` times out waiting for the runner to come online | the startup script failed | read the VM's serial port output (`gcloud compute instances get-serial-port-output ci-gha-e2e-1 --project boxlite-dev-project --zone us-east5-a`) and search for `startup-script` |
 | `start-runner` fails with `could not start ci-gha-e2e-1 after 6 attempts` | `us-east5-a` has no `c3-highcpu-4` capacity (`ZONE_RESOURCE_POOL_EXHAUSTED`) | re-run the job later; if it persists, change the VM's machine type with `gcloud compute instances set-machine-type` while it is stopped |
 | `e2e-tests` fails on low disk | `target/` build artifacts filled the disk | the job evicts caches at 80% use and refuses below 20 GB free; if it still fails, grow the disk |
+| `e2e-tests` hits its 50-minute timeout with every suite slower | box starts wait on a public registry: `boot_timing_profile` shows `stage_image_prepare` in seconds | Rust, CLI, Python and Node suites pull through a [local registry](../../../src/boxlite/tests/README.md#test_registries--the-local-registry); the C suite's `boxlite_simple_new` test still pulls from docker.io |
 | A pull request doesn't trigger the workflow | the `e2e-local` label is missing | a maintainer adds the label (it is the cost gate) |
 | A labeled fork PR doesn't re-run after a push | fork approval is per-commit | remove and re-add the `e2e-local` label to approve the new head |
 

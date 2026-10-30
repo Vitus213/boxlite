@@ -71,6 +71,7 @@ model_box_progress_phase.go
 model_box_state.go
 model_box_volume.go
 model_boxlite_configuration.go
+model_cpu_incident_list_dto.go
 model_create_api_key.go
 model_create_attach_ticket.go
 model_create_image_alias.go
@@ -78,6 +79,7 @@ model_create_linked_account.go
 model_create_organization.go
 model_create_organization_invitation.go
 model_create_organization_role.go
+model_create_prompt_handoff_dto.go
 model_create_region.go
 model_create_region_response.go
 model_create_registry_credential.go
@@ -103,6 +105,7 @@ model_metrics_response.go
 model_network_info.go
 model_network_mode.go
 model_oidc_config.go
+model_onboarding_dto.go
 model_organization.go
 model_organization_box_default_limited_network_egress.go
 model_organization_invitation.go
@@ -120,6 +123,8 @@ model_paginated_logs.go
 model_paginated_traces.go
 model_poll_jobs_response.go
 model_posthog_config.go
+model_prompt_draft_dto.go
+model_prompt_handoff_dto.go
 model_rate_limit_config.go
 model_rate_limit_entry.go
 model_regenerate_api_key_response.go
@@ -128,11 +133,14 @@ model_region_type.go
 model_registry_credential.go
 model_registry_credential_kind.go
 model_runner.go
+model_runner_cpu_incident.go
 model_runner_full.go
 model_runner_health_metrics.go
 model_runner_healthcheck.go
 model_runner_service_health.go
 model_runner_state.go
+model_save_onboarding_dto.go
+model_save_prompt_draft_dto.go
 model_send_webhook_dto.go
 model_storage_access_dto.go
 model_toolbox_proxy_url.go

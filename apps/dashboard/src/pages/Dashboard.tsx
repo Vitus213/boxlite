@@ -5,7 +5,9 @@
  */
 
 import React, { Suspense, useEffect, useMemo, useState } from 'react'
-import { Outlet } from 'react-router-dom'
+import { Outlet, useLocation } from 'react-router-dom'
+import { LogoText } from '@/assets/Logo'
+import { RoutePath } from '@/enums/RoutePath'
 import { Skeleton } from '@/components/ui/skeleton'
 
 import { AnnouncementBanner } from '@/components/AnnouncementBanner'
@@ -22,6 +24,8 @@ import { useSuspensionBanner } from '@/hooks/useSuspensionBanner'
 import { cn } from '@/lib/utils'
 
 const Dashboard: React.FC = () => {
+  const { pathname } = useLocation()
+  const isWelcome = pathname === RoutePath.WELCOME
   const { selectedOrganization } = useSelectedOrganization()
   const [showVerifyEmailDialog, setShowVerifyEmailDialog] = useState(false)
   const config = useConfig()
@@ -80,7 +84,16 @@ const Dashboard: React.FC = () => {
         <AnnouncementBanner text={bannerText} onDismiss={handleDismissBanner} learnMoreUrl={bannerLearnMoreUrl} />
       )}
       <SidebarProvider isBannerVisible={false} defaultOpen={true} className="flex-col">
-        <Sidebar isBannerVisible={isBannerVisible} version={config.version} />
+        <>
+          {isWelcome ? (
+            <header className="flex h-[60px] items-center justify-between border-b border-border px-6 sm:px-10">
+              <LogoText className="h-[40px] w-auto" />
+              <span className="font-mono text-[10px] text-muted-foreground">SET UP YOUR WORKSPACE</span>
+            </header>
+          ) : (
+            <Sidebar isBannerVisible={isBannerVisible} version={config.version} />
+          )}
+        </>
         <SidebarInset className="min-h-0 overflow-visible">
           <div className="w-full min-h-[var(--app-content-height,calc(100svh_-_60px))] overscroll-none">
             {/* Lazy route components (Admin/Billing/Settings/box-details) suspend
@@ -98,7 +111,7 @@ const Dashboard: React.FC = () => {
             </Suspense>
           </div>
         </SidebarInset>
-        <OnboardingDialogHost />
+        {!isWelcome && <OnboardingDialogHost />}
         <Toaster />
         <VerifyEmailDialog open={showVerifyEmailDialog} onOpenChange={setShowVerifyEmailDialog} />
       </SidebarProvider>

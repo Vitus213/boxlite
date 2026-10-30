@@ -7,7 +7,7 @@ const GLOBAL_OPTIONS: &[&str] = &[
     "--registry",
     "--config",
     "--url",
-    "--profile",
+    "--context",
     "--path-prefix",
 ];
 
@@ -33,6 +33,27 @@ fn declares_option(help: &str, option: &str) -> bool {
 }
 
 #[test]
+fn command_help_ssh_only_advertises_separate_operations() {
+    for flag in ["--help", "-h"] {
+        let help = help_for(&["ssh"], flag);
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some("run")),
+            "{help}"
+        );
+        assert!(!help.contains("configure-and-forward"), "{help}");
+        for name in ["configure", "status", "disable", "forward"] {
+            assert!(
+                help.lines()
+                    .any(|line| line.split_whitespace().next() == Some(name)),
+                "{help}"
+            );
+        }
+    }
+}
+
+#[test]
 fn command_help_only_advertises_meaningful_global_options() {
     let cases: &[(&[&str], &[&str])] = &[
         (&["run"], GLOBAL_OPTIONS),
@@ -43,7 +64,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -55,7 +76,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -66,7 +87,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -77,7 +98,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -88,7 +109,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -99,7 +120,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -110,7 +131,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -121,7 +142,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -134,7 +155,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -145,7 +166,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -158,7 +179,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -169,7 +190,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -180,7 +201,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -191,7 +212,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -202,7 +223,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -213,7 +234,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -224,18 +245,7 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
-                "--path-prefix",
-            ],
-        ),
-        (
-            &["ssh", "configure-and-forward"],
-            &[
-                "--debug",
-                "--home",
-                "--config",
-                "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
@@ -246,56 +256,73 @@ fn command_help_only_advertises_meaningful_global_options() {
                 "--home",
                 "--config",
                 "--url",
-                "--profile",
+                "--context",
                 "--path-prefix",
             ],
         ),
         (&["serve"], &["--debug", "--home", "--registry", "--config"]),
-        (&["auth"], &["--debug", "--home", "--profile"]),
+        (&["context"], &["--debug", "--home", "--url", "--context"]),
+        (
+            &["context", "use"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (
+            &["context", "ls"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (
+            &["context", "list"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (
+            &["context", "show"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (&["auth"], &["--debug", "--home", "--context"]),
         (
             &["auth", "login"],
-            &["--debug", "--home", "--url", "--profile"],
+            &["--debug", "--home", "--url", "--context"],
         ),
-        (&["auth", "logout"], &["--debug", "--home", "--profile"]),
+        (&["auth", "logout"], &["--debug", "--home", "--context"]),
         (
             &["auth", "status"],
-            &["--debug", "--home", "--url", "--profile"],
+            &["--debug", "--home", "--url", "--context"],
         ),
         (
             &["auth", "whoami"],
-            &["--debug", "--home", "--url", "--profile"],
+            &["--debug", "--home", "--url", "--context"],
         ),
         (
             &["volume"],
-            &["--debug", "--home", "--url", "--profile", "--path-prefix"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
         ),
         (
             &["volume", "create"],
-            &["--debug", "--home", "--url", "--profile", "--path-prefix"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
         ),
         (
             &["volume", "ls"],
-            &["--debug", "--home", "--url", "--profile", "--path-prefix"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
         ),
         (
             &["volume", "list"],
-            &["--debug", "--home", "--url", "--profile", "--path-prefix"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
         ),
         (
             &["volume", "get"],
-            &["--debug", "--home", "--url", "--profile", "--path-prefix"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
         ),
         (
             &["volume", "inspect"],
-            &["--debug", "--home", "--url", "--profile", "--path-prefix"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
         ),
         (
             &["volume", "rm"],
-            &["--debug", "--home", "--url", "--profile", "--path-prefix"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
         ),
         (
             &["volume", "delete"],
-            &["--debug", "--home", "--url", "--profile", "--path-prefix"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
         ),
         (&["completion"], &[]),
     ];

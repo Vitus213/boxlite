@@ -8,6 +8,7 @@ export enum LocalStorageKey {
   SelectedOrganizationId = 'SelectedOrganizationId',
   SkipOnboardingPrefix = 'SkipOnboarding_',
   OnboardingProgressPrefix = 'OnboardingProgress_',
+  WelcomePrefix = 'Welcome_',
   AnnouncementBannerDismissed = 'AnnouncementBannerDismissed',
   BoxTableColumnVisibility = 'BoxTableColumnVisibilityV2',
 }

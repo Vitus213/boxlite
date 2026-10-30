@@ -1,5 +1,6 @@
 import type { SocketAddress as NativeSocketAddress } from "node:net";
 import type { CopyOptions } from "./copy.js";
+import type { Agents } from "./agents.js";
 
 /**
  * Checked-in TypeScript contracts for the native N-API module.
@@ -639,6 +640,7 @@ export type JsCloneOptions = Record<string, never>;
 export type JsExportOptions = Record<string, never>;
 
 export interface JsBox {
+  readonly agents: Agents;
   readonly id: string;
   readonly name: string | null;
   info(): Promise<JsBoxInfo>;
@@ -713,6 +715,7 @@ export interface JsBoxliteConstructor {
 }
 
 export interface NativeModule {
+  Agents: new () => Agents;
   JsBoxlite: JsBoxliteConstructor;
   JsBoxTunnel: {
     readonly prototype: NativeBoxTunnel & { connect?: () => Promise<unknown> };

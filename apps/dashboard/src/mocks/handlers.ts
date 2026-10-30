@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0
  */
 
+import { onboardingHandlers } from './onboarding-handlers'
 import {
   OrganizationEmail,
   OrganizationPlan,
@@ -94,6 +95,7 @@ function boxesPullingThrough(credential: { registryHost: string; repositoryPrefi
 }
 
 export const handlers = [
+  ...onboardingHandlers(API_URL),
   // Core dashboard surface — fully self-contained so `start:mock` needs no
   // backend and no login (see MockAuthProvider for the fake session).
   http.get(`${API_URL}/config`, () => HttpResponse.json(buildMockConfig(BILLING_API_URL))),

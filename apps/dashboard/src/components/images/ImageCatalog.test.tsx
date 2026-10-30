@@ -11,6 +11,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ImageCatalog } from './ImageCatalog'
+import { BOX_TEMPLATES } from '@/lib/quickstart/box-templates'
+import { catalogNameOf } from '@/lib/image-ref'
 
 // Drive a React controlled input the way a user typing would.
 function typeInto(el: HTMLInputElement, value: string) {
@@ -144,15 +146,30 @@ describe('the image list', () => {
     expect(document.body.textContent).toContain('1 of 20 images · 4.0 KiB')
   })
 
-  // A built-in image has no versions, size or last start of its own to show,
-  // so it sits apart from the table instead of filling a row with dashes.
-  it('lists built-in images apart, with no way to remove them', async () => {
+  it('lists built-in images in searchable rows, with no way to remove them', async () => {
     state.images = [BUILT_IN_IMAGE, ORG_IMAGE]
     await renderCatalog()
 
-    expect(document.body.textContent).toContain('Built-in')
+    expect(document.body.textContent).not.toContain('Built-in')
     expect(buttonWithTitle('docker.io/library/python:3.12-slim')?.textContent).toBe('python')
     expect(buttonWithTitle('Remove python')).toBeUndefined()
+    expect(buttonWithTitle('Remove quay.io/acme/app')).toBeTruthy()
+  })
+
+  it.each([false, true])('allows removal of an owned image matching a template (extra tag: %s)', async (extraTag) => {
+    const template = BOX_TEMPLATES[0]
+    const name = catalogNameOf(template.image)
+    const tag = template.image.slice(template.image.lastIndexOf(':') + 1)
+    state.images = [
+      { ...ORG_IMAGE, id: 'img-template', name, aliases: extraTag ? ['other-version', tag] : [tag] },
+      ORG_IMAGE,
+    ]
+    await renderCatalog()
+
+    expect(buttonWithTitle(`Remove ${name}`)).toBeDefined()
+    await act(async () => buttonWithTitle(`Remove ${name}`)!.click())
+    await act(async () => confirmButton()!.click())
+    expect(mocks.deleteImage).toHaveBeenCalledWith({ idOrRef: 'img-template', organizationId: 'org-1' })
     expect(buttonWithTitle('Remove quay.io/acme/app')).toBeTruthy()
   })
 
@@ -217,13 +234,13 @@ describe('starting a box', () => {
   })
 
   // The create API takes a built-in image under its short name.
-  it('starts a built-in image under its short name', async () => {
+  it('opens the built-in template with its startup configuration', async () => {
     state.images = [BUILT_IN_IMAGE]
     await renderCatalog()
 
     await act(async () => buttonWithTitle('New box from python')?.click())
 
-    expect(state.newBoxImage).toBe('python')
+    expect(mocks.navigate).toHaveBeenCalledWith('/dashboard/quickstart?method=console&template=python')
   })
 
   // The first thing a private image needs is a registry credential, so the

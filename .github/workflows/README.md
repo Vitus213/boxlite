@@ -71,6 +71,10 @@ own.
 Longer treatments live with their subject rather than here: [E2E local
 runbook](../../docs/contributing/development/e2e-local.md), [deployment](../../apps/infra/docs/deployment.md).
 
+Cloud dev E2E also requires the three-profile [identity configuration](../../apps/e2e/README.md#the-cloud-legs-ci).
+Its separate identity step verifies cross-organization isolation and same-organization
+read-only access; missing or mis-scoped credentials fail setup. Prod keeps its single-key smoke suite.
+
 ## Routine checks
 
 `lint` and `test` always report their required conclusion on PRs and merge groups. A newer PR
@@ -81,8 +85,10 @@ Draft PRs defer the Rust, Python, Node and Go SDK coverage matrices, including G
 vet and golangci-lint, which reuse the Go job's native build. The Lint and Format
 workflow (including Go formatting), CodeQL, managed Code Quality, API tests and
 setup checks retain their existing selection. Workflow and infrastructure changes
-run `make test:apps:infra` in a separate, path-filtered job whose failures block
-`Test (conclusion)`.
+run `make coverage:infra` in a separate, path-filtered job whose failures block
+`Test (conclusion)`. It preserves tooling typechecks and all infrastructure suites, collects
+TypeScript source coverage with c8, and uploads `target/coverage/infra/lcov.info` using OIDC
+under the `infra` flag. These changes cannot select the empty-upload path.
 The `nix` job builds the CLI in the flake dev shell, with the runner's
 environment and Rust homes dropped, and boots `alpine:latest`. It runs when the
 flake or an input of `make cli` changes (Make recipes, build scripts,

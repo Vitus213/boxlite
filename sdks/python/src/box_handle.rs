@@ -18,6 +18,12 @@ pub(crate) struct PyBox {
 
 #[pymethods]
 impl PyBox {
+    /// Get the agent namespace without starting the Box.
+    #[getter]
+    fn agents<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("boxlite.agents")?.getattr("Agents")?.call0()
+    }
+
     #[getter]
     fn id(&self) -> PyResult<String> {
         Ok(self.handle.id().to_string())

@@ -3,12 +3,10 @@
  * SPDX-License-Identifier: AGPL-3.0
  */
 
-import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { RoutePath } from '@/enums/RoutePath'
 import { useStartBoxMutation } from '@/hooks/mutations/useStartBoxMutation'
-import { useBoxSessionContext } from '@/hooks/useBoxSessionContext'
 import { useSelectedOrganization } from '@/hooks/useSelectedOrganization'
 import { getBoxRouteId } from '@/lib/box-identity'
 import { handleApiError } from '@/lib/error-handling'
@@ -21,7 +19,6 @@ import { BoxTerminal } from './BoxTerminal'
 
 export function BoxTerminalTab({ box, refreshSignal = 0 }: { box: Box; refreshSignal?: number }) {
   const running = isStoppable(box)
-  const { isTerminalActivated, activateTerminal } = useBoxSessionContext()
   const { authenticatedUserHasPermission } = useSelectedOrganization()
   const writePermitted = authenticatedUserHasPermission(OrganizationRolePermissionsEnum.WRITE_BOXES)
   const startMutation = useStartBoxMutation()
@@ -33,13 +30,6 @@ export function BoxTerminalTab({ box, refreshSignal = 0 }: { box: Box; refreshSi
     } catch (error) {
       handleApiError(error, 'Failed to start box')
     }
-  }
-
-  const [activated, setActivated] = useState(() => isTerminalActivated(box.id))
-
-  const handleConnect = () => {
-    activateTerminal(box.id)
-    setActivated(true)
   }
 
   if (!running) {
@@ -62,30 +52,6 @@ export function BoxTerminalTab({ box, refreshSignal = 0 }: { box: Box; refreshSi
             )}
           </Empty>
         </div>
-      </div>
-    )
-  }
-
-  // Not yet activated. The panel already looks like a terminal, so the way in
-  // is a prompt line, not a poster with an icon and a paragraph.
-  if (!activated) {
-    return (
-      <div className="flex flex-1 flex-col p-5 font-mono text-body">
-        <button
-          type="button"
-          onClick={handleConnect}
-          className="group flex w-full items-center gap-3 text-left text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <span className="text-brand">&gt;</span>
-          <span>
-            connect to <span className="text-foreground">{box.name ?? box.id}</span>
-          </span>
-          <span
-            className="ml-1 inline-block h-[14px] w-[7px] bg-brand/70 group-hover:bg-brand"
-            style={{ animation: 'blink 1.1s steps(1) infinite' }}
-          />
-        </button>
-        <p className="mt-3 text-meta text-muted-foreground/70">opens an interactive shell inside the box</p>
       </div>
     )
   }

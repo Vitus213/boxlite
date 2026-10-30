@@ -4,7 +4,6 @@
  */
 
 import { OrganizationSuspendedError } from '@/api/errors'
-import { OnboardingGuideDialog } from '@/components/OnboardingGuideDialog'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,7 +16,6 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
-import { LocalStorageKey } from '@/enums/LocalStorageKey'
 import { RoutePath } from '@/enums/RoutePath'
 import { useImagesQuery } from '@/hooks/queries/useImagesQuery'
 import { useVolumesQuery } from '@/hooks/queries/useVolumesQuery'
@@ -32,9 +30,7 @@ import { useBoxWsSync } from '@/hooks/useBoxWsSync'
 import { useSelectedOrganization } from '@/hooks/useSelectedOrganization'
 import { getBoxDisplayName, getBoxPublicId, getBoxPublicIdLabel } from '@/lib/box-identity'
 import { handleApiError } from '@/lib/error-handling'
-import { setLocalStorageItem } from '@/lib/local-storage'
 import {
-  ONBOARDING_ENTRY_HIGHLIGHT_EVENT,
   mergeOnboardingProgress,
   ONBOARDING_PROGRESS_EVENT,
   readOnboardingProgress,
@@ -112,7 +108,7 @@ function SpecRow({ label, children, title }: { label: string; children: ReactNod
 export default function BoxDetails() {
   const { boxId } = useParams<{ boxId: string }>()
   const navigate = useNavigate()
-  const [searchParams, setSearchParams] = useSearchParams()
+  const [searchParams] = useSearchParams()
   const config = useConfig()
   const { user } = useAuth()
   const userId = user?.profile.sub
@@ -121,7 +117,6 @@ export default function BoxDetails() {
   const { getRegionName } = useRegions()
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
-  const [showOnboardingDialog, setShowOnboardingDialog] = useState(false)
   const [onboardingProgress, setOnboardingProgress] = useState<OnboardingProgress>(() => readOnboardingProgress(userId))
   const [copied, setCopied] = useState(false)
   const [copiedName, setCopiedName] = useState(false)
@@ -150,24 +145,8 @@ export default function BoxDetails() {
 
   useEffect(() => {
     if (!selectedOrganization || !user?.profile.sub) return
-    if (searchParams.get('onboarding') === '1') setShowOnboardingDialog(true)
-  }, [searchParams, selectedOrganization, user?.profile.sub])
-
-  const clearOnboardingUrlParam = useCallback(() => {
-    if (searchParams.get('onboarding') !== '1') return
-    const nextParams = new URLSearchParams(searchParams)
-    nextParams.delete('onboarding')
-    setSearchParams(nextParams, { replace: true })
-  }, [searchParams, setSearchParams])
-
-  const closeOnboardingDialog = useCallback(() => {
-    if (userId) setLocalStorageItem(`${LocalStorageKey.SkipOnboardingPrefix}${userId}`, 'true')
-    setShowOnboardingDialog(false)
-    window.setTimeout(() => {
-      window.dispatchEvent(new Event(ONBOARDING_ENTRY_HIGHLIGHT_EVENT))
-      clearOnboardingUrlParam()
-    }, 220)
-  }, [clearOnboardingUrlParam, userId])
+    if (searchParams.get('onboarding') === '1') navigate(RoutePath.QUICKSTART, { replace: true })
+  }, [navigate, searchParams, selectedOrganization, user?.profile.sub])
 
   const { data: box, isLoading, isError, error, refetch } = useBoxQuery(boxId ?? '')
 
@@ -297,13 +276,6 @@ export default function BoxDetails() {
 
   return (
     <div className="flex h-[calc(100svh-60px)] min-h-0 flex-col gap-[14px] px-4 pb-[22px] pt-4 font-mono text-[13px] sm:px-6 lg:px-[40px]">
-      <OnboardingGuideDialog
-        open={showOnboardingDialog}
-        onOpenChange={(isOpen) => (isOpen ? setShowOnboardingDialog(true) : closeOnboardingDialog())}
-        onProgressChange={updateOnboardingProgress}
-        progress={onboardingProgress}
-      />
-
       {/* breadcrumb */}
       <div className="flex flex-none items-center gap-[9px] text-[12px] text-muted-foreground">
         <button type="button" onClick={() => navigate(RoutePath.BOXES)} className="hover:text-foreground">
