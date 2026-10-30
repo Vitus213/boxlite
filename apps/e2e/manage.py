@@ -266,7 +266,9 @@ class Environment:
         keys = load(secret_file)
         if not keys:
             keys = {key: secrets.token_hex(32) for key in ("admin", "runner", "proxy", "encryption", "salt", "postgres", "minio")}
-            save(secret_file, keys)
+        if not keys.get("generation"):
+            keys["generation"] = secrets.token_hex(16)
+        save(secret_file, keys)
         p = self.ports
         endpoint = lambda name: f"http://127.0.0.1:{p[name]}"
         config = dict(NODE_ENV="development", ENVIRONMENT="development", PORT=str(p["API"]), VERSION="0.0.0-e2e",
@@ -499,17 +501,13 @@ class Environment:
                         "registry": ("REGISTRY", 5000), "dex": ("DEX", 5556), "minio": ("MINIO", 9000)}
 
     def credential_identity(self, name):
-        """Fingerprint the values a running dependency was configured with."""
-        if name == "postgres":
-            value = self.env.get("PGPASSWORD", "")
-        elif name == "minio":
-            value = self.env.get("S3_SECRET_KEY", "")
-        elif name == "dex":
+        """Identify the credential generation a dependency was created with."""
+        if name in ("postgres", "minio"):
+            return str(load(self.state / "secrets.json").get("generation", "missing"))
+        if name == "dex":
             config = self.state / "dex.yaml"
-            value = digest(config) if config.exists() else "missing"
-        else:
-            value = ""
-        return hashlib.sha256(value.encode()).hexdigest()
+            return digest(config) if config.exists() else "missing"
+        return "static"
 
     def dependency(self, name):
         if self.cancelled.is_set():

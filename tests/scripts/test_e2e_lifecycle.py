@@ -115,10 +115,11 @@ class LifecycleTest(unittest.TestCase):
             tool_version = "2"
             self.assertNotEqual(first, self.environment.recipe_identity())
 
-    def test_credential_identity_tracks_password_and_dex_config(self):
-        self.environment.env["PGPASSWORD"] = "one"
+    def test_credential_identity_tracks_generation_and_dex_config(self):
+        secrets = self.environment.state / "secrets.json"
+        secrets.write_text(json.dumps({"generation": "one"}))
         first = self.environment.credential_identity("postgres")
-        self.environment.env["PGPASSWORD"] = "two"
+        secrets.write_text(json.dumps({"generation": "two"}))
         self.assertNotEqual(first, self.environment.credential_identity("postgres"))
         config = self.environment.state / "dex.yaml"
         config.write_text("issuer: one\n")
@@ -128,6 +129,7 @@ class LifecycleTest(unittest.TestCase):
 
     def test_dependency_recreates_postgres_volume_when_credentials_change(self):
         self.environment.env["PGPASSWORD"] = "new-password"
+        (self.environment.state / "secrets.json").write_text(json.dumps({"generation": "new"}))
         name = f"{self.environment.prefix}-postgres"
         stale = {
             "Name": f"/{name}",
