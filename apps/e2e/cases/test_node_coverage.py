@@ -6,7 +6,6 @@ coverage. Each test spawns a TypeScript driver via the installed tsx.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -16,10 +15,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
 from e2e_auth import auth_context
 from images import default_image
+from node_tsx import driver_argv
 
 REPO = Path(__file__).resolve().parents[3]
 NODE_SDK = REPO / "sdks/node"
-TSX = str(Path(os.environ.get("BOXLITE_E2E_TSX", REPO / "apps/node_modules/.bin/tsx")))
 DRIVERS = REPO / "apps/e2e/sdks/node"
 IMAGE = default_image()
 
@@ -35,8 +34,8 @@ def _has_node_napi_build() -> bool:
 def node_env():
     if auth_context().auth != "api-key":
         pytest.skip("Node SDK E2E only supports API-key today")
-    if not shutil.which(TSX):
-        pytest.fail("tsx not installed; run make test:e2e:setup")
+    if driver_argv(REPO, DRIVERS / "e2e_exec.ts") is None:
+        pytest.skip("Node/tsx not installed")
     if not _has_node_napi_build():
         pytest.skip("Node SDK napi binding not built")
     ctx = auth_context()
@@ -50,8 +49,10 @@ def node_env():
 def _run_driver(node_env, name: str) -> subprocess.CompletedProcess:
     src = DRIVERS / name
     assert src.exists(), f"{src} missing"
+    command = driver_argv(REPO, src)
+    assert command is not None
     return subprocess.run(
-        [TSX, str(src)],
+        command,
         env=node_env, timeout=180, capture_output=True, text=True,
         cwd=str(NODE_SDK),
     )

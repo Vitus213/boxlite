@@ -19,12 +19,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
 from e2e_auth import auth_context
 from images import default_image
+from node_tsx import driver_argv
 from path_verification import runner_journal_seek, runner_hits_for_box
 
 REPO = Path(__file__).resolve().parents[3]
 SRC = REPO / "apps/e2e/sdks/node/e2e_basic.ts"
 NODE_SDK = REPO / "sdks/node"
-TSX = str(Path(os.environ.get("BOXLITE_E2E_TSX", REPO / "apps/node_modules/.bin/tsx")))
 BOX_ID_RE = re.compile(r"[A-Za-z0-9]{12}")
 
 def _has_node_napi_build() -> bool:
@@ -42,8 +42,8 @@ def node_runner():
         pytest.skip("Node SDK REST E2E only supports API-key credentials today")
     if not shutil.which("node"):
         pytest.skip("node not installed")
-    if not shutil.which(TSX):
-        pytest.fail("tsx not installed; run make test:e2e:setup")
+    if driver_argv(REPO, SRC) is None:
+        pytest.skip("Node/tsx not installed")
     if not SRC.exists():
         pytest.skip(f"{SRC} missing")
     if not _has_node_napi_build():
@@ -63,9 +63,11 @@ def test_node_sdk_create_exec_remove(node_runner):
         **ctx.api_key_sdk_env(),
         "BOXLITE_E2E_IMAGE": default_image(),
     }
-    # Run the installed workspace tsx without fetching packages.
+    # Run through the managed tsx or the unmanaged npx fallback.
+    command = driver_argv(REPO, node_runner)
+    assert command is not None
     r = subprocess.run(
-        [TSX, str(node_runner)],
+        command,
         env=env, timeout=180, capture_output=True, text=True,
         cwd=str(NODE_SDK),
     )
