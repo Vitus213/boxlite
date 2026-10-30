@@ -5,10 +5,14 @@
  */
 
 import { ApiProperty, ApiPropertyOptional, ApiSchema } from '@nestjs/swagger'
+import { OnboardingDto } from './onboarding.dto'
 import { Organization } from '../entities/organization.entity'
 
 @ApiSchema({ name: 'Organization' })
 export class OrganizationDto {
+  @ApiPropertyOptional({ type: OnboardingDto, nullable: true })
+  onboarding: OnboardingDto | null
+
   @ApiProperty({
     description: 'Organization ID',
   })
@@ -158,6 +162,7 @@ export class OrganizationDto {
       personal: isDefaultForAuthenticatedUser,
       createdAt: organization.createdAt,
       updatedAt: organization.updatedAt,
+      onboarding: organization.onboarding ?? null,
       suspended: organization.suspended,
       suspensionReason: organization.suspensionReason,
       suspendedAt: organization.suspendedAt,

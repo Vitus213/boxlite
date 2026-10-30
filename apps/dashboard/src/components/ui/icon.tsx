@@ -169,3 +169,6 @@ export const X = makeIcon('close')
 export const XIcon = makeIcon('close')
 export const XCircle = makeIcon('close-box')
 export const XCircleIcon = makeIcon('close-box')
+
+export const Globe = makeIcon('globe')
+export const Braces = makeIcon('code')

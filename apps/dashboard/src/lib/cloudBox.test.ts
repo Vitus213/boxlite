@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest'
+import { boxTemplateFor } from './quickstart/box-templates'
 import { toBoxApiCreateRequest, validateLifecyclePolicy } from './cloudBox'
 
 describe('toBoxApiCreateRequest', () => {
+  it('forwards the accepted Bun startup recipe to the REST create boundary', () => {
+    const template = boxTemplateFor('bun')!
+    const request = toBoxApiCreateRequest({ image: template.image, ...template.startup })
+    expect(request).toMatchObject({
+      image: 'docker.io/oven/bun:1',
+      entrypoint: ['/bin/sh'],
+      cmd: ['-c', 'while :; do sleep 3600; done'],
+    })
+  })
+
   it('converts dashboard GiB memory into Box API MiB', () => {
     const request = toBoxApiCreateRequest({ resources: { cpu: 2, memory: 4, disk: 10 } })
 

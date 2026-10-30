@@ -2,7 +2,8 @@
 
 SSH starts disabled. The Rust runtime exposes `LiteBox::ssh()` to configure,
 query, or disable it, for local boxes and for REST-backed boxes served by
-`boxlite serve` ([HTTP control](#http-control-with-boxlite-serve)). Only
+`boxlite serve` ([HTTP control](#http-control-with-boxlite-serve)) or the
+[hosted cloud API](#hosted-cloud-api). Only
 `configure()` follows the implicit-start policy of exec, metrics, and file
 copying. A `Configured` or `Stopped` box using the image's default command can
 start implicitly. If `BoxOptions.cmd` or `entrypoint` explicitly sets the main
@@ -23,8 +24,8 @@ control answer `404` or reject with `Unsupported`; there is no capability
 negotiation. See the [SDK API references](../reference/README.md#sdk-api-references)
 for language-specific control APIs.
 
-SSH does not publish a host port; forward one with [`boxlite ssh configure-and-forward` or
-`boxlite ssh forward`](#cli) or other network forwarding. For component diagrams and implementation details, see
+SSH does not publish a host port; forward one with [`boxlite ssh forward`](#cli)
+or other network forwarding. For component diagrams and implementation details, see
 [Guest SSH architecture](../../src/guest/src/service/ssh/README.md).
 
 ```rust,ignore
@@ -69,16 +70,20 @@ requires `start()` before `configure()`.
 [CLI reference](../reference/cli/README.md#boxlite-ssh) lists every flag.
 
 ```bash
-boxlite ssh configure dev --ssh-config ssh-config.json   # complete SshConfig; prints SshStatus
+boxlite ssh configure dev --ssh-config ssh.json          # complete SshConfig; prints SshStatus
 boxlite ssh forward dev                                  # forwards 127.0.0.1:<random> to guest SSH
-boxlite ssh configure-and-forward dev --host-key host_key --login alice --authorized-key alice.pub
 boxlite ssh disable dev
 ```
 
-- `configure` and `configure-and-forward` replace the whole configuration once, which disconnects
+Configure SSH first, then use `forward` to open a local listener until Ctrl-C.
+For one account, configuration can instead read key files with
+`boxlite ssh configure dev --host-key host_key --login alice --authorized-key alice.pub`.
+
+- `configure` replaces the whole configuration once, which disconnects
   every SSH client, including those connected through another tunnel.
-- `forward` and `configure-and-forward` target the port in the returned status, so a guest
-  listener on port `0` works. Ctrl-C ends only local forwarding; guest SSH stays enabled.
+- `forward` reads status and targets the port SSH actually bound, so a guest
+  listener on port `0` works. It leaves configuration and generation unchanged.
+  Ctrl-C ends only local forwarding; guest SSH stays enabled.
 - SSH lives in guest memory. A local CLI exit stops boxes that are not detached
   (plain `boxlite run`, SDK boxes with `detach=false`); a box such a command started
   loses SSH with its VM. Boxes from `boxlite create` and `run -d` keep running.
@@ -124,6 +129,41 @@ curl -fsS -X POST "$BOXLITE_URL/v1/boxes/$BOX_ID/ssh" \
   -H 'Content-Type: application/json' \
   --data-binary @ssh-config.json
 ```
+
+## Hosted cloud API
+
+The hosted API serves the same three operations at `/v1/boxes/{box_id}/ssh` and
+`/v1/{prefix}/boxes/{box_id}/ssh`, by box ID or name, within the caller's
+organization. The API checks policy and lifecycle; the box's runner validates the
+body and calls the guest once.
+
+| Method   | Permission    | Activity | Lifecycle |
+|----------|---------------|----------|-----------|
+| `POST`   | `write:boxes` | Counts after authorization and box lookup, including lifecycle refusals | Running box: configured. `stopped` box: auto-resumed on its default command. `409` when the box is not ready and `auto_resume=false`, when it must start a box with an explicit `cmd`/`entrypoint`, or when it cannot resume (`error`, `archived`, …). |
+| `GET`    | membership    | None      | `started` or `stopped` only; a stopped box reports disabled status with generation `0`. Other states answer `409`. |
+| `DELETE` | `write:boxes` | None      | Same as `GET`; idempotent. |
+
+With auto-resume enabled, configuring SSH waits for a box already starting
+(`creating`, `starting`, `restoring`), even with an explicit `cmd` or `entrypoint`.
+You can request start, then configure SSH while that start completes.
+
+Errors follow the [HTTP control](#http-control-with-boxlite-serve) rules, with two
+differences:
+
+- The API parses JSON before proxying. Malformed JSON returns `400` `Invalid JSON in
+  request body`. Repeated keys collapse to their last value before the runner sees
+  them; case-variant and unknown fields, and `null` values where the schema
+  requires a string or array, are still rejected. The optional `ca` may be `null`.
+- Lifecycle refusals from the API are a plain `409` with a message naming the
+  reason; SDKs read them, like the runner's `409 invalid_state`, as `InvalidState`.
+
+SSH lives in guest memory, so every stop, restart, or auto-stop disables it.
+After the box runs again, run `boxlite ssh configure` to restore its configuration,
+then `boxlite ssh forward` to reconnect; forwarding fails on a disabled listener.
+
+Forwarding uses the box's [public tunnel](#cli), which needs inbound access enabled on the box. Ending
+the local `boxlite ssh forward` leaves that tunnel open; revoke it with `boxlite
+network tunnel BOX PORT --revoke`.
 
 ## Guest protocol and lifecycle
 The internal host-only `boxlite.v1.Ssh` gRPC service remains available on

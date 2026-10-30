@@ -275,3 +275,9 @@ A user in more than one organization switches between them from the profile
 menu, which marks the personal one. The pick is kept in `localStorage`, so the
 next login opens the same organization; if the user was removed from it in the
 meantime, the console falls back to their personal organization.
+
+## New-user onboarding
+
+The welcome flow saves organization intent before confirming signup credit delivery.
+[Onboarding](ONBOARDING.md) describes the dedicated Quickstart page, public image templates,
+server-backed prompt drafts, and deployment/verification requirements.

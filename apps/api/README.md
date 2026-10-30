@@ -255,3 +255,8 @@ next recorded creation, start or deletion request creates any missing row. Produ
 duration is unmeasured. Metadata validation rules and administrator authorization
 apply to this selection. See the [activation design](../../docs/contributing/investigations/organization-activation-facts.md#review-follow-up-optimistic-updates-outside-box-transactions)
 for the source evidence, concurrency model and verification boundaries.
+
+## Onboarding persistence
+
+See [organization onboarding](src/organization/ONBOARDING.md) for the profile, personal prompt
+draft and idempotent handoff API contracts, migration order, and frontend integration behavior.

@@ -4,6 +4,7 @@ import { shouldAutoOpenOnboarding, type OnboardingAutoOpenSignals } from './onbo
 // A brand-new signup on a brand-new browser: nothing dismissed, empty account.
 const freshSignup: OnboardingAutoOpenSignals = {
   requestedByUrl: false,
+  canCompleteWelcome: true,
   dismissedInThisBrowser: false,
   accountStateLoaded: true,
   hasApiKeys: false,
@@ -50,4 +51,11 @@ describe('shouldAutoOpenOnboarding', () => {
   it('opens on ?onboarding=1 before account state has loaded', () => {
     expect(shouldAutoOpenOnboarding(signals({ requestedByUrl: true, accountStateLoaded: false }))).toBe(true)
   })
+})
+
+it('does not force members without organization setup permission into Welcome', () => {
+  expect(shouldAutoOpenOnboarding({ ...freshSignup, canCompleteWelcome: false })).toBe(false)
+})
+it('preserves explicit Quickstart requests for non-owners', () => {
+  expect(shouldAutoOpenOnboarding({ ...freshSignup, canCompleteWelcome: false, requestedByUrl: true })).toBe(true)
 })

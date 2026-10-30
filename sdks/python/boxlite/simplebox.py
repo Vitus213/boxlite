@@ -9,6 +9,7 @@ import logging
 from enum import IntEnum
 from typing import TYPE_CHECKING, Optional
 
+from .agents import Agents
 from .exec import ExecResult
 
 if TYPE_CHECKING:
@@ -110,6 +111,11 @@ class SimpleBox:
     - _create_box_options(): Return BoxOptions for their specific use case
     - Add domain-specific methods (e.g., CodeBox.run(), BrowserBox.navigate())
     """
+
+    @property
+    def agents(self) -> Agents:
+        """Get the agent namespace without starting the Box."""
+        return Agents()
 
     def __init__(
         self,

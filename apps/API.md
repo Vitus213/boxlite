@@ -263,13 +263,14 @@ omitted from those responses.
 </details>
 
 <details>
-<summary><b>Runners and jobs</b> · 15 routes</summary>
+<summary><b>Runners and jobs</b> · 16 routes</summary>
 
 | Method   | Path                                   | What it does                                                   |
 | -------- | -------------------------------------- | -------------------------------------------------------------- |
 | `GET`    | `/api/runners`                         | Lists runners.                                                 |
 | `POST`   | `/api/runners`                         | Registers a runner.                                            |
 | `GET`    | `/api/runners/me`                      | Returns the authenticated runner's identity and configuration. |
+| `POST`   | `/api/runners/me/cpu-incidents`         | Internal runner-only CPU incident ingestion; excluded from customer OpenAPI and SDKs. |
 | `GET`    | `/api/runners/me/images/registry-credentials` | Internal registry-proxy lookup; excluded from customer OpenAPI and SDKs. |
 | `GET`    | `/api/runners/by-box/{boxId}`          | Resolves the runner assigned to a box.                         |
 | `GET`    | `/api/runners/{id}`                    | Gets a runner by ID.                                           |
@@ -286,10 +287,11 @@ omitted from those responses.
 </details>
 
 <details>
-<summary><b>Administration</b> · 6 routes</summary>
+<summary><b>Administration</b> · 7 routes</summary>
 
 | Method   | Path                                 | What it does                                   |
 | -------- | ------------------------------------ | ---------------------------------------------- |
+| `GET`    | `/api/admin/runner-cpu-incidents`      | Queries CPU incident evidence by capture completion time range for backoffice operations. |
 | `GET`    | `/api/admin/runners`                 | Lists runners using admin authorization.       |
 | `POST`   | `/api/admin/runners`                 | Registers a runner as an administrator.        |
 | `GET`    | `/api/admin/runners/{id}`            | Gets a runner by ID as an administrator.       |
@@ -468,7 +470,7 @@ organization membership.
 </details>
 
 <details>
-<summary><b>Execution, files, metrics, and networking</b> · 12 routes</summary>
+<summary><b>Execution, files, metrics, networking, and SSH</b> · 15 routes</summary>
 
 | Method   | Path                                                          | What it does                                            |
 | -------- | ------------------------------------------------------------- | ------------------------------------------------------- |
@@ -484,10 +486,22 @@ organization membership.
 | `POST`   | `/api/v1[/{prefix}]/boxes/{boxId}/network/tunnel?port={port}` | Prepares a tunnel with optional `isPublic` (default true); returns `uri`, `isPublic`, `token`. Private tokens are complete once, then masked. |
 | `DELETE` | `/api/v1[/{prefix}]/boxes/{boxId}/network/tunnel?port={port}` | Revokes either access mode; `204`, idempotent. |
 | `PUT`    | `/api/v1[/{prefix}]/boxes/{boxId}/network/inbound`            | Enables or disables a box's inbound access.             |
+| `POST`   | `/api/v1[/{prefix}]/boxes/{boxId}/ssh`                        | Replaces guest SSH configuration once; counts as activity and may auto-resume a box. |
+| `GET`    | `/api/v1[/{prefix}]/boxes/{boxId}/ssh`                        | Reads guest SSH status without resuming the box or counting as activity. |
+| `DELETE` | `/api/v1[/{prefix}]/boxes/{boxId}/ssh`                        | Disables guest SSH without resuming the box or counting as activity. |
 
 The exec, signal, resize, files, and metrics handlers are registered as
 catch-all reverse proxies to the box's assigned runner; the methods shown are
 the portable contract, which the runner's own route registration enforces.
+
+SSH configuration uses the reported lifecycle state for admission: a stored
+`stopped` or `unknown` state with desired state `started` is treated as `starting`
+or `creating`, respectively. With auto-resume enabled, configuration waits for
+that start, including for boxes with an explicit `cmd` or `entrypoint`. Before
+submitting a new start, the API rechecks SSH startup restrictions against the
+current box state under its lifecycle lock. The API waits for readiness before
+forwarding configuration; the runner checks that the box is running and returns
+`409 invalid_state` if that check fails.
 
 </details>
 
@@ -609,6 +623,76 @@ sign-in. See [invitation link lifetime](./infra/docs/configuration.md#invitation
 
 </details>
 
+### Runner CPU incidents
+
+Backoffice uses `GET /api/admin/runner-cpu-incidents` with an administrator API key
+or JWT. Ordinary users and runner credentials receive 403; absent/invalid credentials
+receive 401. Responses use `Cache-Control: private, no-store`.
+
+| Query | Contract |
+| --- | --- |
+| `from` | Required RFC 3339 timestamp with timezone, at most milliseconds. Inclusive lower bound on `windowEndedAt`. |
+| `to` | Required RFC 3339 timestamp with timezone, at most milliseconds. Exclusive upper bound on `windowEndedAt`; must be after `from`. |
+| `limit` | Integer 1–200; default 50. Returns only the first N matching rows in ID ascending order. |
+| `runnerId` | Optional UUID filter. |
+
+```bash
+curl --get "$BOXLITE_API_URL/api/admin/runner-cpu-incidents" \
+  --header "Authorization: Bearer $BOXLITE_ADMIN_API_KEY" \
+  --data-urlencode "from=2026-10-29T00:00:00Z" \
+  --data-urlencode "to=2026-10-30T00:00:00Z" \
+  --data-urlencode "limit=100"
+```
+
+```json
+{
+  "items": [{
+    "id": "42", "runnerId": "11111111-1111-4111-8111-111111111111",
+    "eventId": "22222222-2222-4222-8222-222222222222",
+    "highCpuSince": "2026-10-29T00:00:00.000Z",
+    "windowStartedAt": "2026-10-29T00:05:00.000Z",
+    "windowEndedAt": "2026-10-29T00:07:00.000Z",
+    "runnerCpuPercent": 85, "boxId": "example-box", "image": "ubuntu:24.04",
+    "cpuSeconds": 240, "samplingComplete": true,
+    "receivedAt": "2026-10-29T00:12:01.000Z"
+  }]
+}
+```
+
+The range is `[from,to)` on capture completion time, not high-load start or server
+receipt time. Adjacent ranges therefore do not share boundary rows. Results are
+ordered by ID ascending and capped at `limit`; additional matching rows are not
+returned. There is no pagination. An empty result is `{"items":[]}`. IDs remain
+decimal strings to preserve bigint precision; ID order need not match completion
+or commit order. Upload retries can add records to older ranges. Repeating a query
+still returns only the first N matches, so this endpoint does not guarantee full
+incident enumeration. Consumers must recheck the box's
+current state before operations: evidence persists after migration or deletion.
+`cpuSeconds / window duration in seconds * 100` gives average box CPU percent
+on a one-core scale, which can exceed 100%. `samplingComplete=false` means the
+ranking uses incomplete measurements; `boxId=null` means no positive CPU delta
+was measurable. `image` is the winner's exact `BoxInfo.Image` string from its last
+successful counter sample in the window, retained even if that box subsequently
+exits. No winner or an older report without image produces `image=null`; an empty
+string is preserved. This is the supplied image reference, not a resolved digest.
+There is no acknowledgement or automatic box operation.
+
+Runner ingestion is `POST /api/runners/me/cpu-incidents`, authenticated by the
+runner's existing token. Its body is the example row without `id`, `runnerId`
+and `receivedAt`. Valid first uploads and retries return 204. The API derives
+`runnerId` from credentials, requires more than 80% CPU and at least five minutes
+between `highCpuSince` and `windowStartedAt`, validates the capture and counters, and ignores
+duplicate event IDs from the same runner. Malformed bodies/queries return 400.
+The optional `image` accepts a string or null; it must be absent/null when `boxId`
+is null. It travels in this same report without another runner API query.
+This internal route is excluded from customer OpenAPI and generated SDKs;
+the admin route is described by Nest Swagger.
+
+Deploy the pre-deploy migration, then the API, then runners. See the
+[runner monitoring contract](runner/README.md#sustained-cpu-incidents) for sampling,
+retry and restart limitations and [the table schema](SCHEMA.md#runner_cpu_incident)
+for persistence guarantees.
+
 ## Runner API
 
 **Service:** `apps/runner` · **Base path:** `/` · **Port:** `3003` in
@@ -648,7 +732,7 @@ runtime and its microVMs.
 </details>
 
 <details>
-<summary><b>Embedded BoxLite operations</b> · 10 routes</summary>
+<summary><b>Embedded BoxLite operations</b> · 13 routes</summary>
 
 | Method    | Path                                           | What it does                                          |
 | --------- | ---------------------------------------------- | ----------------------------------------------------- |
@@ -662,6 +746,9 @@ runtime and its microVMs.
 | `GET`     | `/v1/boxes/{boxId}/files?path={path}`          | Downloads a local box path as a tar stream.           |
 | `GET`     | `/v1/boxes/{boxId}/metrics`                    | Returns local box metrics.                            |
 | `CONNECT` | `/v1/boxes/{boxId}/network/tunnel?port={port}` | Opens a raw bidirectional TCP tunnel to a guest port; answers `409` with code `box_not_running` for a box that is not running, which the proxy uses to wake the box. |
+| `POST`    | `/v1/boxes/{boxId}/ssh`                        | Configures guest SSH once after checking that the box is running; otherwise `409 invalid_state`. |
+| `GET`     | `/v1/boxes/{boxId}/ssh`                        | Reads guest SSH status; a stopped box answers disabled status without a handle. |
+| `DELETE`  | `/v1/boxes/{boxId}/ssh`                        | Disables guest SSH; never boots the box.              |
 
 </details>
 

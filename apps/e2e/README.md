@@ -25,9 +25,9 @@ CLI matrix and both authentication modes, is in
 
 ## What the suite verifies
 
-Every test in `cases/` uses the REST-mode runtime built by `conftest.py::rt`.
-There is no path to local FFI from this directory — tests would fail import if
-they tried.
+Product acceptance cases use the REST-mode runtime built by `conftest.py::rt`.
+`test_network_harness.py` separately checks probe failures and framing without
+creating a box; those checks are not counted as product E2E evidence.
 
 `cases/test_path_verification.py` is the meta-test: it spawns one box, runs
 one exec, and asserts that **both** `:3000` (API) and `:8080` (runner)
@@ -166,9 +166,8 @@ Run:
 pytest apps/e2e/cases/ -v --timeout=120
 ```
 
-For CI, store `BOXLITE_E2E_API_KEY` as a repository secret and pass it
-as an environment variable. No local bootstrap, Postgres, or runner
-services are needed — the remote stack provides everything.
+For CI, use the stage-specific secrets below. No local bootstrap, Postgres,
+or runner services are needed — the remote stack provides everything.
 
 ## The cloud legs (CI)
 
@@ -180,9 +179,46 @@ stage. It is dispatch-only, plus one call from `deploy-infra.yml`:
 | `dev` | `api.dev.boxlite.ai/api` | everything | yes |
 | `prod` | `api.boxlite.ai/api` | `-m smoke` | no |
 
-Each stage authenticates with its own repo secret — `BOXLITE_DEV_API_KEY` and
-`BOXLITE_PROD_API_KEY` — so a run only ever holds the key for the stage it
-targets.
+The workflow writes the selected stage's credentials to
+`~/.boxlite/credentials.toml` with mode `0600`. Each key's organization is
+discovered through `/v1/me`; API-key permissions come from `/api-keys/current`,
+not the placeholder scopes in `/v1/me`.
+
+| Stage | Repository secret | Profile | Role |
+| --- | --- | --- | --- |
+| dev | `BOXLITE_DEV_API_KEY` | `p1` | Existing main suite and sweep; foreign identity for p2 boxes |
+| dev | `BOXLITE_DEV_P2_API_KEY` | `p2` | Owns identity-test boxes in a different organization from p1 |
+| dev | `BOXLITE_DEV_P2_READONLY_API_KEY` | `p2_readonly` | Reads p2's private previews; cannot manage their network |
+| prod | `BOXLITE_PROD_API_KEY` | `p1` | Smoke suite only |
+
+Both dev owner keys need `write:boxes` and `delete:boxes`; the readonly key
+may carry only `read:*` permissions or none. Configuration fails before box
+creation if any required key is missing/invalid, if p1 and p2 share an
+organization, or if p2_readonly belongs to a different organization from p2.
+`deploy-infra.yml` explicitly forwards all three dev secrets to the reusable
+workflow. Prod neither receives nor requires dev keys.
+
+The dev identity step reuses the SDK builds and runs
+`test_preview_private_identity_permissions` with p2 as primary, p2_readonly
+as same-org reader, and p1 as foreign identity. It sets
+`BOXLITE_E2E_REQUIRE_IDENTITIES=1`, so missing profiles fail instead of skip.
+The p1 main suite deselects this case; the identity result is uploaded alongside
+the main result as `pytest-identities.xml`. These cases exercise API-key scopes,
+not different users, member removal, or OIDC roles.
+
+Run the same identity pair locally with three profiles targeting one API:
+
+```bash
+unset BOXLITE_E2E_API_URL BOXLITE_E2E_API_KEY BOXLITE_E2E_PREFIX
+BOXLITE_E2E_PROFILE=p2 BOXLITE_E2E_READONLY_PROFILE=p2_readonly \
+BOXLITE_E2E_FOREIGN_PROFILE=p1 BOXLITE_E2E_REQUIRE_IDENTITIES=1 \
+BOXLITE_E2E_SKIP_PATH_VERIFY=1 \
+make test:rest:e2e AUTH=api-key FILTER=preview_private_identity_permissions
+```
+
+Use ordinary user-owned API keys: a system administrator can bypass resource
+permission checks even when its key declares only read scopes. The actual
+denied-write assertions must pass; credential metadata alone is not acceptance.
 
 `smoke` marks the cases that are safe against a paying stage — one box at a
 time, no quota probing, no deliberate error storms. Mark a new case
@@ -205,17 +241,18 @@ Two limits worth knowing before reading a green dev run as proof:
 
 ### Known-broken on a cloud stage
 
-Three tunnel cases are `xfail(strict=True)` on a remote stage only:
-`test_python_sdk_tunnel_proxies_http_from_rest_box` and the Node driver's HTTP
-and stopped-box cases. On a cloud stage, a tunnel read that waits for the guest
-service to close the connection fails with "peer closed connection without
-sending TLS close_notify", while reads that stop at the expected bytes succeed
-(#1950). Which hop drops the TLS shutdown is not established, and no local run
-has shown it, so the mark is `TUNNEL_READ_TO_EOF_XFAIL` in `cases/conftest.py`,
-conditional on `STAGE_IS_REMOTE`. Strict means CI fails the day the stage stops
-failing, which is when the marks should come off; it cannot tell that cause
-from a later break in the same case. The half-close cases keep their own
-unconditional mark.
+Tunnel HTTP exchanges read the complete Content-Length response. Only the
+separate Python/Node TLS-shutdown cases carry the remote-only strict xfail
+for #1950, and only a missing TLS close_notify **after a complete response**
+qualifies. Setup, status, payload and WebSocket failures stay failures.
+The independent half-close cases accept only the specific lost-response
+failure after a healthy tunnel has been demonstrated. Their strict marks
+must be removed when the underlying defect is fixed.
+
+The preview, private-session, revocation and dynamic-policy matrix, including
+infra-local and browser setup, is in [network-coverage.md](network-coverage.md).
+A stage running an older server can fail this matrix; validate against the
+current infra-local source and record the deployed revision separately.
 
 `test_cli_run_foreground_streams_command_output` is marked the same conditional
 way for a different reason. `boxlite run
@@ -264,9 +301,10 @@ Two things keep that from recurring:
   `pol599-repro` and four siblings — someone's investigation, idle for a day,
   indistinguishable from a stranded box by age alone.
 
-  What that leaves uncovered, deliberately: the polyglot drivers
-  (`apps/e2e/sdks/`) and the CLI cases create boxes with neither the prefix
-  nor a lifetime, so no sweep that CI runs can reclaim one. The ones the
+  Some older polyglot drivers (`apps/e2e/sdks/`) and CLI cases still create
+  boxes without the prefix or lifetime, so the CI sweep cannot reclaim them.
+  The Node tunnel driver now supplies both and disables auto-resume for its
+  stopped-box scenario. The ones the
   cloud legs run — Node and the CLI — remove their box in a `finally`, so
   there this only bites when a run is killed mid-driver; the Go and C drivers
   exit past their own cleanup, and both legs `--ignore` those cases.

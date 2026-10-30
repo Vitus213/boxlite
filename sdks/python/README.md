@@ -2,6 +2,9 @@
 
 Python bindings for BoxLite - an embeddable virtual machine runtime for secure, isolated code execution.
 
+Access the [agent API](../../docs/reference/agents.md) through `Box.agents`
+and `SimpleBox.agents`, including synchronous wrappers, grouped options and error handling.
+
 ## Overview
 
 The BoxLite Python SDK provides a Pythonic API for creating and managing isolated execution environments. Built with PyO3, it wraps the Rust BoxLite runtime with async-first Python bindings.
@@ -1011,8 +1014,11 @@ make dev:python
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
-python -m pytest sdks/python/tests/
+# Unit tests
+make test:unit:python
+
+# Integration tests (need a VM; boxes pull through the local test registry)
+make test:integration:python
 ```
 
 ### Building Wheels

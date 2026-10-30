@@ -3,18 +3,17 @@
  * SPDX-License-Identifier: AGPL-3.0
  */
 
-import { useEffect, useState, type ReactNode } from 'react'
+import { type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { Spinner } from '@/components/ui/spinner'
 import { RoutePath } from '@/enums/RoutePath'
 import { useBoxQuery } from '@/hooks/queries/useBoxQuery'
-import { useBoxSessionContext } from '@/hooks/useBoxSessionContext'
 import { useBoxWsSync } from '@/hooks/useBoxWsSync'
 import { getBoxDisplayName, getBoxPublicId } from '@/lib/box-identity'
 import { isStoppable } from '@/lib/utils/box'
-import { Container, Play, TerminalSquare } from '@/components/ui/icon'
+import { Container, TerminalSquare } from '@/components/ui/icon'
 import { BoxFullscreenShell } from './BoxFullscreenShell'
 import { BoxTerminal } from './BoxTerminal'
 
@@ -24,20 +23,6 @@ export default function BoxTerminalFullscreen() {
   useBoxWsSync({ boxId })
 
   const running = box ? isStoppable(box) : false
-  const { isTerminalActivated, activateTerminal } = useBoxSessionContext()
-  const [activated, setActivated] = useState(() => (boxId ? isTerminalActivated(boxId) : false))
-
-  // Carry session activation across remounts
-  useEffect(() => {
-    if (boxId && isTerminalActivated(boxId)) setActivated(true)
-  }, [boxId, isTerminalActivated])
-
-  const handleConnect = () => {
-    if (!boxId) return
-    activateTerminal(boxId)
-    setActivated(true)
-  }
-
   const backPath = boxId ? RoutePath.BOX_DETAILS.replace(':boxId', boxId) : RoutePath.BOXES
 
   let body: ReactNode
@@ -75,22 +60,6 @@ export default function BoxTerminalFullscreen() {
         </EmptyHeader>
         <Button variant="outline" size="sm" asChild>
           <Link to={backPath}>Back</Link>
-        </Button>
-      </Empty>
-    )
-  } else if (!activated) {
-    body = (
-      <Empty>
-        <EmptyHeader>
-          <EmptyMedia>
-            <TerminalSquare className="size-12 text-muted-foreground" />
-          </EmptyMedia>
-          <EmptyTitle>Terminal</EmptyTitle>
-          <EmptyDescription>Connect to an interactive terminal session in your box.</EmptyDescription>
-        </EmptyHeader>
-        <Button onClick={handleConnect}>
-          <Play className="size-4" />
-          Connect
         </Button>
       </Empty>
     )

@@ -28,9 +28,13 @@ import type { CreateOrganizationInvitation } from '../models';
 // @ts-ignore
 import type { CreateOrganizationRole } from '../models';
 // @ts-ignore
+import type { CreatePromptHandoffDto } from '../models';
+// @ts-ignore
 import type { CreateRegion } from '../models';
 // @ts-ignore
 import type { CreateRegionResponse } from '../models';
+// @ts-ignore
+import type { OnboardingDto } from '../models';
 // @ts-ignore
 import type { Organization } from '../models';
 // @ts-ignore
@@ -50,9 +54,17 @@ import type { OrganizationUser } from '../models';
 // @ts-ignore
 import type { OtelConfig } from '../models';
 // @ts-ignore
+import type { PromptDraftDto } from '../models';
+// @ts-ignore
+import type { PromptHandoffDto } from '../models';
+// @ts-ignore
 import type { RegenerateApiKeyResponse } from '../models';
 // @ts-ignore
 import type { Region } from '../models';
+// @ts-ignore
+import type { SaveOnboardingDto } from '../models';
+// @ts-ignore
+import type { SavePromptDraftDto } from '../models';
 // @ts-ignore
 import type { UpdateOrganizationDefaultRegion } from '../models';
 // @ts-ignore
@@ -278,6 +290,49 @@ export const OrganizationsApiAxiosParamCreator = function (configuration?: Confi
             let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
             localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
             localVarRequestOptions.data = serializeDataIfNeeded(createOrganizationRole, localVarRequestOptions, configuration)
+
+            return {
+                url: toPathString(localVarUrlObj),
+                options: localVarRequestOptions,
+            };
+        },
+        /**
+         * 
+         * @summary Prepare an immutable prompt handoff
+         * @param {string} organizationId 
+         * @param {CreatePromptHandoffDto} createPromptHandoffDto 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        createQuickstartHandoff: async (organizationId: string, createPromptHandoffDto: CreatePromptHandoffDto, options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+            // verify required parameter 'organizationId' is not null or undefined
+            assertParamExists('createQuickstartHandoff', 'organizationId', organizationId)
+            // verify required parameter 'createPromptHandoffDto' is not null or undefined
+            assertParamExists('createQuickstartHandoff', 'createPromptHandoffDto', createPromptHandoffDto)
+            const localVarPath = `/organizations/{organizationId}/quickstart/handoffs`
+                .replace('{organizationId}', encodeURIComponent(String(organizationId)));
+            // use dummy base URL string because the URL constructor only accepts absolute URLs.
+            const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
+            let baseOptions;
+            if (configuration) {
+                baseOptions = configuration.baseOptions;
+            }
+
+            const localVarRequestOptions = { method: 'POST', ...baseOptions, ...options};
+            const localVarHeaderParameter = {} as any;
+            const localVarQueryParameter = {} as any;
+
+            // authentication bearer required
+            // http bearer authentication required
+            await setBearerAuthToObject(localVarHeaderParameter, configuration)
+
+            localVarHeaderParameter['Content-Type'] = 'application/json';
+            localVarHeaderParameter['Accept'] = 'application/json';
+
+            setSearchParams(localVarUrlObj, localVarQueryParameter);
+            let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
+            localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+            localVarRequestOptions.data = serializeDataIfNeeded(createPromptHandoffDto, localVarRequestOptions, configuration)
 
             return {
                 url: toPathString(localVarUrlObj),
@@ -654,6 +709,44 @@ export const OrganizationsApiAxiosParamCreator = function (configuration?: Confi
         },
         /**
          * 
+         * @summary Read organization onboarding answers
+         * @param {string} organizationId 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        getOrganizationOnboarding: async (organizationId: string, options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+            // verify required parameter 'organizationId' is not null or undefined
+            assertParamExists('getOrganizationOnboarding', 'organizationId', organizationId)
+            const localVarPath = `/organizations/{organizationId}/onboarding`
+                .replace('{organizationId}', encodeURIComponent(String(organizationId)));
+            // use dummy base URL string because the URL constructor only accepts absolute URLs.
+            const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
+            let baseOptions;
+            if (configuration) {
+                baseOptions = configuration.baseOptions;
+            }
+
+            const localVarRequestOptions = { method: 'GET', ...baseOptions, ...options};
+            const localVarHeaderParameter = {} as any;
+            const localVarQueryParameter = {} as any;
+
+            // authentication bearer required
+            // http bearer authentication required
+            await setBearerAuthToObject(localVarHeaderParameter, configuration)
+
+            localVarHeaderParameter['Accept'] = 'application/json';
+
+            setSearchParams(localVarUrlObj, localVarQueryParameter);
+            let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
+            localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+
+            return {
+                url: toPathString(localVarUrlObj),
+                options: localVarRequestOptions,
+            };
+        },
+        /**
+         * 
          * @summary Get organization OTEL config by box auth token
          * @param {string} authToken Box Auth Token
          * @param {*} [options] Override http request option.
@@ -720,6 +813,44 @@ export const OrganizationsApiAxiosParamCreator = function (configuration?: Confi
             await setBearerAuthToObject(localVarHeaderParameter, configuration)
 
             // authentication oauth2 required
+
+            localVarHeaderParameter['Accept'] = 'application/json';
+
+            setSearchParams(localVarUrlObj, localVarQueryParameter);
+            let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
+            localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+
+            return {
+                url: toPathString(localVarUrlObj),
+                options: localVarRequestOptions,
+            };
+        },
+        /**
+         * 
+         * @summary Read your prompt draft in this organization
+         * @param {string} organizationId 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        getQuickstartPrompt: async (organizationId: string, options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+            // verify required parameter 'organizationId' is not null or undefined
+            assertParamExists('getQuickstartPrompt', 'organizationId', organizationId)
+            const localVarPath = `/organizations/{organizationId}/quickstart/prompt`
+                .replace('{organizationId}', encodeURIComponent(String(organizationId)));
+            // use dummy base URL string because the URL constructor only accepts absolute URLs.
+            const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
+            let baseOptions;
+            if (configuration) {
+                baseOptions = configuration.baseOptions;
+            }
+
+            const localVarRequestOptions = { method: 'GET', ...baseOptions, ...options};
+            const localVarHeaderParameter = {} as any;
+            const localVarQueryParameter = {} as any;
+
+            // authentication bearer required
+            // http bearer authentication required
+            await setBearerAuthToObject(localVarHeaderParameter, configuration)
 
             localVarHeaderParameter['Accept'] = 'application/json';
 
@@ -1049,6 +1180,48 @@ export const OrganizationsApiAxiosParamCreator = function (configuration?: Confi
         },
         /**
          * 
+         * @summary Record successful clipboard copy
+         * @param {string} organizationId 
+         * @param {string} requestId 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        markQuickstartHandoffCopied: async (organizationId: string, requestId: string, options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+            // verify required parameter 'organizationId' is not null or undefined
+            assertParamExists('markQuickstartHandoffCopied', 'organizationId', organizationId)
+            // verify required parameter 'requestId' is not null or undefined
+            assertParamExists('markQuickstartHandoffCopied', 'requestId', requestId)
+            const localVarPath = `/organizations/{organizationId}/quickstart/handoffs/{requestId}/copied`
+                .replace('{organizationId}', encodeURIComponent(String(organizationId)))
+                .replace('{requestId}', encodeURIComponent(String(requestId)));
+            // use dummy base URL string because the URL constructor only accepts absolute URLs.
+            const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
+            let baseOptions;
+            if (configuration) {
+                baseOptions = configuration.baseOptions;
+            }
+
+            const localVarRequestOptions = { method: 'PATCH', ...baseOptions, ...options};
+            const localVarHeaderParameter = {} as any;
+            const localVarQueryParameter = {} as any;
+
+            // authentication bearer required
+            // http bearer authentication required
+            await setBearerAuthToObject(localVarHeaderParameter, configuration)
+
+            localVarHeaderParameter['Accept'] = 'application/json';
+
+            setSearchParams(localVarUrlObj, localVarQueryParameter);
+            let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
+            localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+
+            return {
+                url: toPathString(localVarUrlObj),
+                options: localVarRequestOptions,
+            };
+        },
+        /**
+         * 
          * @summary Regenerate proxy API key for a region
          * @param {string} id Region ID
          * @param {string} [xBoxLiteOrganizationID] Use with JWT to specify the organization ID
@@ -1085,6 +1258,92 @@ export const OrganizationsApiAxiosParamCreator = function (configuration?: Confi
             setSearchParams(localVarUrlObj, localVarQueryParameter);
             let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
             localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+
+            return {
+                url: toPathString(localVarUrlObj),
+                options: localVarRequestOptions,
+            };
+        },
+        /**
+         * 
+         * @summary Save organization onboarding answers
+         * @param {string} organizationId 
+         * @param {SaveOnboardingDto} saveOnboardingDto 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        saveOrganizationOnboarding: async (organizationId: string, saveOnboardingDto: SaveOnboardingDto, options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+            // verify required parameter 'organizationId' is not null or undefined
+            assertParamExists('saveOrganizationOnboarding', 'organizationId', organizationId)
+            // verify required parameter 'saveOnboardingDto' is not null or undefined
+            assertParamExists('saveOrganizationOnboarding', 'saveOnboardingDto', saveOnboardingDto)
+            const localVarPath = `/organizations/{organizationId}/onboarding`
+                .replace('{organizationId}', encodeURIComponent(String(organizationId)));
+            // use dummy base URL string because the URL constructor only accepts absolute URLs.
+            const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
+            let baseOptions;
+            if (configuration) {
+                baseOptions = configuration.baseOptions;
+            }
+
+            const localVarRequestOptions = { method: 'PUT', ...baseOptions, ...options};
+            const localVarHeaderParameter = {} as any;
+            const localVarQueryParameter = {} as any;
+
+            // authentication bearer required
+            // http bearer authentication required
+            await setBearerAuthToObject(localVarHeaderParameter, configuration)
+
+            localVarHeaderParameter['Content-Type'] = 'application/json';
+            localVarHeaderParameter['Accept'] = 'application/json';
+
+            setSearchParams(localVarUrlObj, localVarQueryParameter);
+            let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
+            localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+            localVarRequestOptions.data = serializeDataIfNeeded(saveOnboardingDto, localVarRequestOptions, configuration)
+
+            return {
+                url: toPathString(localVarUrlObj),
+                options: localVarRequestOptions,
+            };
+        },
+        /**
+         * 
+         * @summary Save your prompt draft with revision checking
+         * @param {string} organizationId 
+         * @param {SavePromptDraftDto} savePromptDraftDto 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        saveQuickstartPrompt: async (organizationId: string, savePromptDraftDto: SavePromptDraftDto, options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+            // verify required parameter 'organizationId' is not null or undefined
+            assertParamExists('saveQuickstartPrompt', 'organizationId', organizationId)
+            // verify required parameter 'savePromptDraftDto' is not null or undefined
+            assertParamExists('saveQuickstartPrompt', 'savePromptDraftDto', savePromptDraftDto)
+            const localVarPath = `/organizations/{organizationId}/quickstart/prompt`
+                .replace('{organizationId}', encodeURIComponent(String(organizationId)));
+            // use dummy base URL string because the URL constructor only accepts absolute URLs.
+            const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
+            let baseOptions;
+            if (configuration) {
+                baseOptions = configuration.baseOptions;
+            }
+
+            const localVarRequestOptions = { method: 'PUT', ...baseOptions, ...options};
+            const localVarHeaderParameter = {} as any;
+            const localVarQueryParameter = {} as any;
+
+            // authentication bearer required
+            // http bearer authentication required
+            await setBearerAuthToObject(localVarHeaderParameter, configuration)
+
+            localVarHeaderParameter['Content-Type'] = 'application/json';
+            localVarHeaderParameter['Accept'] = 'application/json';
+
+            setSearchParams(localVarUrlObj, localVarQueryParameter);
+            let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
+            localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+            localVarRequestOptions.data = serializeDataIfNeeded(savePromptDraftDto, localVarRequestOptions, configuration)
 
             return {
                 url: toPathString(localVarUrlObj),
@@ -1624,6 +1883,20 @@ export const OrganizationsApiFp = function(configuration?: Configuration) {
         },
         /**
          * 
+         * @summary Prepare an immutable prompt handoff
+         * @param {string} organizationId 
+         * @param {CreatePromptHandoffDto} createPromptHandoffDto 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        async createQuickstartHandoff(organizationId: string, createPromptHandoffDto: CreatePromptHandoffDto, options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<PromptHandoffDto>> {
+            const localVarAxiosArgs = await localVarAxiosParamCreator.createQuickstartHandoff(organizationId, createPromptHandoffDto, options);
+            const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
+            const localVarOperationServerBasePath = operationServerMap['OrganizationsApi.createQuickstartHandoff']?.[localVarOperationServerIndex]?.url;
+            return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
+        },
+        /**
+         * 
          * @summary Create a new region
          * @param {CreateRegion} createRegion 
          * @param {string} [xBoxLiteOrganizationID] Use with JWT to specify the organization ID
@@ -1744,6 +2017,19 @@ export const OrganizationsApiFp = function(configuration?: Configuration) {
         },
         /**
          * 
+         * @summary Read organization onboarding answers
+         * @param {string} organizationId 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        async getOrganizationOnboarding(organizationId: string, options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<OnboardingDto>> {
+            const localVarAxiosArgs = await localVarAxiosParamCreator.getOrganizationOnboarding(organizationId, options);
+            const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
+            const localVarOperationServerBasePath = operationServerMap['OrganizationsApi.getOrganizationOnboarding']?.[localVarOperationServerIndex]?.url;
+            return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
+        },
+        /**
+         * 
          * @summary Get organization OTEL config by box auth token
          * @param {string} authToken Box Auth Token
          * @param {*} [options] Override http request option.
@@ -1766,6 +2052,19 @@ export const OrganizationsApiFp = function(configuration?: Configuration) {
             const localVarAxiosArgs = await localVarAxiosParamCreator.getOrganizationReferralCode(organizationId, options);
             const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
             const localVarOperationServerBasePath = operationServerMap['OrganizationsApi.getOrganizationReferralCode']?.[localVarOperationServerIndex]?.url;
+            return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
+        },
+        /**
+         * 
+         * @summary Read your prompt draft in this organization
+         * @param {string} organizationId 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        async getQuickstartPrompt(organizationId: string, options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<PromptDraftDto>> {
+            const localVarAxiosArgs = await localVarAxiosParamCreator.getQuickstartPrompt(organizationId, options);
+            const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
+            const localVarOperationServerBasePath = operationServerMap['OrganizationsApi.getQuickstartPrompt']?.[localVarOperationServerIndex]?.url;
             return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
         },
         /**
@@ -1873,6 +2172,20 @@ export const OrganizationsApiFp = function(configuration?: Configuration) {
         },
         /**
          * 
+         * @summary Record successful clipboard copy
+         * @param {string} organizationId 
+         * @param {string} requestId 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        async markQuickstartHandoffCopied(organizationId: string, requestId: string, options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<PromptHandoffDto>> {
+            const localVarAxiosArgs = await localVarAxiosParamCreator.markQuickstartHandoffCopied(organizationId, requestId, options);
+            const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
+            const localVarOperationServerBasePath = operationServerMap['OrganizationsApi.markQuickstartHandoffCopied']?.[localVarOperationServerIndex]?.url;
+            return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
+        },
+        /**
+         * 
          * @summary Regenerate proxy API key for a region
          * @param {string} id Region ID
          * @param {string} [xBoxLiteOrganizationID] Use with JWT to specify the organization ID
@@ -1883,6 +2196,34 @@ export const OrganizationsApiFp = function(configuration?: Configuration) {
             const localVarAxiosArgs = await localVarAxiosParamCreator.regenerateProxyApiKey(id, xBoxLiteOrganizationID, options);
             const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
             const localVarOperationServerBasePath = operationServerMap['OrganizationsApi.regenerateProxyApiKey']?.[localVarOperationServerIndex]?.url;
+            return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
+        },
+        /**
+         * 
+         * @summary Save organization onboarding answers
+         * @param {string} organizationId 
+         * @param {SaveOnboardingDto} saveOnboardingDto 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        async saveOrganizationOnboarding(organizationId: string, saveOnboardingDto: SaveOnboardingDto, options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<OnboardingDto>> {
+            const localVarAxiosArgs = await localVarAxiosParamCreator.saveOrganizationOnboarding(organizationId, saveOnboardingDto, options);
+            const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
+            const localVarOperationServerBasePath = operationServerMap['OrganizationsApi.saveOrganizationOnboarding']?.[localVarOperationServerIndex]?.url;
+            return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
+        },
+        /**
+         * 
+         * @summary Save your prompt draft with revision checking
+         * @param {string} organizationId 
+         * @param {SavePromptDraftDto} savePromptDraftDto 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        async saveQuickstartPrompt(organizationId: string, savePromptDraftDto: SavePromptDraftDto, options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<PromptDraftDto>> {
+            const localVarAxiosArgs = await localVarAxiosParamCreator.saveQuickstartPrompt(organizationId, savePromptDraftDto, options);
+            const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
+            const localVarOperationServerBasePath = operationServerMap['OrganizationsApi.saveQuickstartPrompt']?.[localVarOperationServerIndex]?.url;
             return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
         },
         /**
@@ -2093,6 +2434,17 @@ export const OrganizationsApiFactory = function (configuration?: Configuration, 
         },
         /**
          * 
+         * @summary Prepare an immutable prompt handoff
+         * @param {string} organizationId 
+         * @param {CreatePromptHandoffDto} createPromptHandoffDto 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        createQuickstartHandoff(organizationId: string, createPromptHandoffDto: CreatePromptHandoffDto, options?: RawAxiosRequestConfig): AxiosPromise<PromptHandoffDto> {
+            return localVarFp.createQuickstartHandoff(organizationId, createPromptHandoffDto, options).then((request) => request(axios, basePath));
+        },
+        /**
+         * 
          * @summary Create a new region
          * @param {CreateRegion} createRegion 
          * @param {string} [xBoxLiteOrganizationID] Use with JWT to specify the organization ID
@@ -2186,6 +2538,16 @@ export const OrganizationsApiFactory = function (configuration?: Configuration, 
         },
         /**
          * 
+         * @summary Read organization onboarding answers
+         * @param {string} organizationId 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        getOrganizationOnboarding(organizationId: string, options?: RawAxiosRequestConfig): AxiosPromise<OnboardingDto> {
+            return localVarFp.getOrganizationOnboarding(organizationId, options).then((request) => request(axios, basePath));
+        },
+        /**
+         * 
          * @summary Get organization OTEL config by box auth token
          * @param {string} authToken Box Auth Token
          * @param {*} [options] Override http request option.
@@ -2203,6 +2565,16 @@ export const OrganizationsApiFactory = function (configuration?: Configuration, 
          */
         getOrganizationReferralCode(organizationId: string, options?: RawAxiosRequestConfig): AxiosPromise<OrganizationReferralCode> {
             return localVarFp.getOrganizationReferralCode(organizationId, options).then((request) => request(axios, basePath));
+        },
+        /**
+         * 
+         * @summary Read your prompt draft in this organization
+         * @param {string} organizationId 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        getQuickstartPrompt(organizationId: string, options?: RawAxiosRequestConfig): AxiosPromise<PromptDraftDto> {
+            return localVarFp.getQuickstartPrompt(organizationId, options).then((request) => request(axios, basePath));
         },
         /**
          * 
@@ -2285,6 +2657,17 @@ export const OrganizationsApiFactory = function (configuration?: Configuration, 
         },
         /**
          * 
+         * @summary Record successful clipboard copy
+         * @param {string} organizationId 
+         * @param {string} requestId 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        markQuickstartHandoffCopied(organizationId: string, requestId: string, options?: RawAxiosRequestConfig): AxiosPromise<PromptHandoffDto> {
+            return localVarFp.markQuickstartHandoffCopied(organizationId, requestId, options).then((request) => request(axios, basePath));
+        },
+        /**
+         * 
          * @summary Regenerate proxy API key for a region
          * @param {string} id Region ID
          * @param {string} [xBoxLiteOrganizationID] Use with JWT to specify the organization ID
@@ -2293,6 +2676,28 @@ export const OrganizationsApiFactory = function (configuration?: Configuration, 
          */
         regenerateProxyApiKey(id: string, xBoxLiteOrganizationID?: string, options?: RawAxiosRequestConfig): AxiosPromise<RegenerateApiKeyResponse> {
             return localVarFp.regenerateProxyApiKey(id, xBoxLiteOrganizationID, options).then((request) => request(axios, basePath));
+        },
+        /**
+         * 
+         * @summary Save organization onboarding answers
+         * @param {string} organizationId 
+         * @param {SaveOnboardingDto} saveOnboardingDto 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        saveOrganizationOnboarding(organizationId: string, saveOnboardingDto: SaveOnboardingDto, options?: RawAxiosRequestConfig): AxiosPromise<OnboardingDto> {
+            return localVarFp.saveOrganizationOnboarding(organizationId, saveOnboardingDto, options).then((request) => request(axios, basePath));
+        },
+        /**
+         * 
+         * @summary Save your prompt draft with revision checking
+         * @param {string} organizationId 
+         * @param {SavePromptDraftDto} savePromptDraftDto 
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        saveQuickstartPrompt(organizationId: string, savePromptDraftDto: SavePromptDraftDto, options?: RawAxiosRequestConfig): AxiosPromise<PromptDraftDto> {
+            return localVarFp.saveQuickstartPrompt(organizationId, savePromptDraftDto, options).then((request) => request(axios, basePath));
         },
         /**
          * 
@@ -2475,6 +2880,18 @@ export class OrganizationsApi extends BaseAPI {
 
     /**
      * 
+     * @summary Prepare an immutable prompt handoff
+     * @param {string} organizationId 
+     * @param {CreatePromptHandoffDto} createPromptHandoffDto 
+     * @param {*} [options] Override http request option.
+     * @throws {RequiredError}
+     */
+    public createQuickstartHandoff(organizationId: string, createPromptHandoffDto: CreatePromptHandoffDto, options?: RawAxiosRequestConfig) {
+        return OrganizationsApiFp(this.configuration).createQuickstartHandoff(organizationId, createPromptHandoffDto, options).then((request) => request(this.axios, this.basePath));
+    }
+
+    /**
+     * 
      * @summary Create a new region
      * @param {CreateRegion} createRegion 
      * @param {string} [xBoxLiteOrganizationID] Use with JWT to specify the organization ID
@@ -2577,6 +2994,17 @@ export class OrganizationsApi extends BaseAPI {
 
     /**
      * 
+     * @summary Read organization onboarding answers
+     * @param {string} organizationId 
+     * @param {*} [options] Override http request option.
+     * @throws {RequiredError}
+     */
+    public getOrganizationOnboarding(organizationId: string, options?: RawAxiosRequestConfig) {
+        return OrganizationsApiFp(this.configuration).getOrganizationOnboarding(organizationId, options).then((request) => request(this.axios, this.basePath));
+    }
+
+    /**
+     * 
      * @summary Get organization OTEL config by box auth token
      * @param {string} authToken Box Auth Token
      * @param {*} [options] Override http request option.
@@ -2595,6 +3023,17 @@ export class OrganizationsApi extends BaseAPI {
      */
     public getOrganizationReferralCode(organizationId: string, options?: RawAxiosRequestConfig) {
         return OrganizationsApiFp(this.configuration).getOrganizationReferralCode(organizationId, options).then((request) => request(this.axios, this.basePath));
+    }
+
+    /**
+     * 
+     * @summary Read your prompt draft in this organization
+     * @param {string} organizationId 
+     * @param {*} [options] Override http request option.
+     * @throws {RequiredError}
+     */
+    public getQuickstartPrompt(organizationId: string, options?: RawAxiosRequestConfig) {
+        return OrganizationsApiFp(this.configuration).getQuickstartPrompt(organizationId, options).then((request) => request(this.axios, this.basePath));
     }
 
     /**
@@ -2686,6 +3125,18 @@ export class OrganizationsApi extends BaseAPI {
 
     /**
      * 
+     * @summary Record successful clipboard copy
+     * @param {string} organizationId 
+     * @param {string} requestId 
+     * @param {*} [options] Override http request option.
+     * @throws {RequiredError}
+     */
+    public markQuickstartHandoffCopied(organizationId: string, requestId: string, options?: RawAxiosRequestConfig) {
+        return OrganizationsApiFp(this.configuration).markQuickstartHandoffCopied(organizationId, requestId, options).then((request) => request(this.axios, this.basePath));
+    }
+
+    /**
+     * 
      * @summary Regenerate proxy API key for a region
      * @param {string} id Region ID
      * @param {string} [xBoxLiteOrganizationID] Use with JWT to specify the organization ID
@@ -2694,6 +3145,30 @@ export class OrganizationsApi extends BaseAPI {
      */
     public regenerateProxyApiKey(id: string, xBoxLiteOrganizationID?: string, options?: RawAxiosRequestConfig) {
         return OrganizationsApiFp(this.configuration).regenerateProxyApiKey(id, xBoxLiteOrganizationID, options).then((request) => request(this.axios, this.basePath));
+    }
+
+    /**
+     * 
+     * @summary Save organization onboarding answers
+     * @param {string} organizationId 
+     * @param {SaveOnboardingDto} saveOnboardingDto 
+     * @param {*} [options] Override http request option.
+     * @throws {RequiredError}
+     */
+    public saveOrganizationOnboarding(organizationId: string, saveOnboardingDto: SaveOnboardingDto, options?: RawAxiosRequestConfig) {
+        return OrganizationsApiFp(this.configuration).saveOrganizationOnboarding(organizationId, saveOnboardingDto, options).then((request) => request(this.axios, this.basePath));
+    }
+
+    /**
+     * 
+     * @summary Save your prompt draft with revision checking
+     * @param {string} organizationId 
+     * @param {SavePromptDraftDto} savePromptDraftDto 
+     * @param {*} [options] Override http request option.
+     * @throws {RequiredError}
+     */
+    public saveQuickstartPrompt(organizationId: string, savePromptDraftDto: SavePromptDraftDto, options?: RawAxiosRequestConfig) {
+        return OrganizationsApiFp(this.configuration).saveQuickstartPrompt(organizationId, savePromptDraftDto, options).then((request) => request(this.axios, this.basePath));
     }
 
     /**

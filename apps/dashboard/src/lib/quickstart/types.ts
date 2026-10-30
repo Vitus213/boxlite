@@ -24,4 +24,5 @@ export interface OnboardingCodeExample extends QuickstartInterfaceDefinition {
 export interface RenderOnboardingCodeExampleOptions {
   apiKey?: string
   restApiUrl: string
+  command?: { executable: string; args: string[] }
 }

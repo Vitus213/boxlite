@@ -9,6 +9,7 @@ All URIs are relative to *http://localhost:3000*
 |[**createOrganization**](#createorganization) | **POST** /organizations | Create organization|
 |[**createOrganizationInvitation**](#createorganizationinvitation) | **POST** /organizations/{organizationId}/invitations | Create organization invitation|
 |[**createOrganizationRole**](#createorganizationrole) | **POST** /organizations/{organizationId}/roles | Create organization role|
+|[**createQuickstartHandoff**](#createquickstarthandoff) | **POST** /organizations/{organizationId}/quickstart/handoffs | Prepare an immutable prompt handoff|
 |[**createRegion**](#createregion) | **POST** /regions | Create a new region|
 |[**declineOrganizationInvitation**](#declineorganizationinvitation) | **POST** /organizations/invitations/{invitationId}/decline | Decline organization invitation|
 |[**deleteOrganization**](#deleteorganization) | **DELETE** /organizations/{organizationId} | Delete organization|
@@ -18,8 +19,10 @@ All URIs are relative to *http://localhost:3000*
 |[**getOrganization**](#getorganization) | **GET** /organizations/{organizationId} | Get organization by ID|
 |[**getOrganizationByBoxId**](#getorganizationbyboxid) | **GET** /organizations/by-box-id/{boxId} | Get organization by box ID|
 |[**getOrganizationInvitationsCountForAuthenticatedUser**](#getorganizationinvitationscountforauthenticateduser) | **GET** /organizations/invitations/count | Get count of organization invitations for authenticated user|
+|[**getOrganizationOnboarding**](#getorganizationonboarding) | **GET** /organizations/{organizationId}/onboarding | Read organization onboarding answers|
 |[**getOrganizationOtelConfigByBoxAuthToken**](#getorganizationotelconfigbyboxauthtoken) | **GET** /organizations/otel-config/by-box-auth-token/{authToken} | Get organization OTEL config by box auth token|
 |[**getOrganizationReferralCode**](#getorganizationreferralcode) | **GET** /organizations/{organizationId}/referral-code | Get or initialize an organization invitation code|
+|[**getQuickstartPrompt**](#getquickstartprompt) | **GET** /organizations/{organizationId}/quickstart/prompt | Read your prompt draft in this organization|
 |[**getRegionById**](#getregionbyid) | **GET** /regions/{id} | Get region by ID|
 |[**leaveOrganization**](#leaveorganization) | **POST** /organizations/{organizationId}/leave | Leave organization|
 |[**listAvailableRegions**](#listavailableregions) | **GET** /regions | List all available regions for the organization|
@@ -28,7 +31,10 @@ All URIs are relative to *http://localhost:3000*
 |[**listOrganizationMembers**](#listorganizationmembers) | **GET** /organizations/{organizationId}/users | List organization members|
 |[**listOrganizationRoles**](#listorganizationroles) | **GET** /organizations/{organizationId}/roles | List organization roles|
 |[**listOrganizations**](#listorganizations) | **GET** /organizations | List organizations|
+|[**markQuickstartHandoffCopied**](#markquickstarthandoffcopied) | **PATCH** /organizations/{organizationId}/quickstart/handoffs/{requestId}/copied | Record successful clipboard copy|
 |[**regenerateProxyApiKey**](#regenerateproxyapikey) | **POST** /regions/{id}/regenerate-proxy-api-key | Regenerate proxy API key for a region|
+|[**saveOrganizationOnboarding**](#saveorganizationonboarding) | **PUT** /organizations/{organizationId}/onboarding | Save organization onboarding answers|
+|[**saveQuickstartPrompt**](#savequickstartprompt) | **PUT** /organizations/{organizationId}/quickstart/prompt | Save your prompt draft with revision checking|
 |[**setOrganizationDefaultRegion**](#setorganizationdefaultregion) | **PATCH** /organizations/{organizationId}/default-region | Set default region for organization|
 |[**suspendOrganization**](#suspendorganization) | **POST** /organizations/{organizationId}/suspend | Suspend organization|
 |[**unsuspendOrganization**](#unsuspendorganization) | **POST** /organizations/{organizationId}/unsuspend | Unsuspend organization|
@@ -299,6 +305,60 @@ const { status, data } = await apiInstance.createOrganizationRole(
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
 |**201** | Organization role created successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **createQuickstartHandoff**
+> PromptHandoffDto createQuickstartHandoff(createPromptHandoffDto)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    CreatePromptHandoffDto
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+let createPromptHandoffDto: CreatePromptHandoffDto; //
+
+const { status, data } = await apiInstance.createQuickstartHandoff(
+    organizationId,
+    createPromptHandoffDto
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **createPromptHandoffDto** | **CreatePromptHandoffDto**|  | |
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**PromptHandoffDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
 
@@ -758,6 +818,56 @@ This endpoint does not have any parameters.
 
 [[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
 
+# **getOrganizationOnboarding**
+> OnboardingDto getOrganizationOnboarding()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+
+const { status, data } = await apiInstance.getOrganizationOnboarding(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**OnboardingDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
 # **getOrganizationOtelConfigByBoxAuthToken**
 > OtelConfig getOrganizationOtelConfigByBoxAuthToken()
 
@@ -857,6 +967,56 @@ const { status, data } = await apiInstance.getOrganizationReferralCode(
 |**200** |  |  -  |
 |**403** | Organization access denied or invitation unavailable |  -  |
 |**503** | Invitation code generation unavailable |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **getQuickstartPrompt**
+> PromptDraftDto getQuickstartPrompt()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+
+const { status, data } = await apiInstance.getQuickstartPrompt(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**PromptDraftDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
 
@@ -1249,6 +1409,59 @@ This endpoint does not have any parameters.
 
 [[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
 
+# **markQuickstartHandoffCopied**
+> PromptHandoffDto markQuickstartHandoffCopied()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+let requestId: string; //
+
+const { status, data } = await apiInstance.markQuickstartHandoffCopied(
+    organizationId,
+    requestId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] |  | |
+| **requestId** | [**string**] |  | |
+
+
+### Return type
+
+**PromptHandoffDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
 # **regenerateProxyApiKey**
 > RegenerateApiKeyResponse regenerateProxyApiKey()
 
@@ -1299,6 +1512,114 @@ const { status, data } = await apiInstance.regenerateProxyApiKey(
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
 |**200** | The proxy API key has been successfully regenerated. |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **saveOrganizationOnboarding**
+> OnboardingDto saveOrganizationOnboarding(saveOnboardingDto)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    SaveOnboardingDto
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+let saveOnboardingDto: SaveOnboardingDto; //
+
+const { status, data } = await apiInstance.saveOrganizationOnboarding(
+    organizationId,
+    saveOnboardingDto
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **saveOnboardingDto** | **SaveOnboardingDto**|  | |
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**OnboardingDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **saveQuickstartPrompt**
+> PromptDraftDto saveQuickstartPrompt(savePromptDraftDto)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    SavePromptDraftDto
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+let savePromptDraftDto: SavePromptDraftDto; //
+
+const { status, data } = await apiInstance.saveQuickstartPrompt(
+    organizationId,
+    savePromptDraftDto
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **savePromptDraftDto** | **SavePromptDraftDto**|  | |
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**PromptDraftDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
 

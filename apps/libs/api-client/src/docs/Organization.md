@@ -5,6 +5,7 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
+**onboarding** | [**OnboardingDto**](OnboardingDto.md) |  | [optional] [default to undefined]
 **id** | **string** | Organization ID | [default to undefined]
 **name** | **string** | Organization name | [default to undefined]
 **createdBy** | **string** | User ID of the organization creator | [default to undefined]
@@ -36,6 +37,7 @@ Name | Type | Description | Notes
 import { Organization } from './api';
 
 const instance: Organization = {
+    onboarding,
     id,
     name,
     createdBy,

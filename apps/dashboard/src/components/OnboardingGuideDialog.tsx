@@ -9,6 +9,7 @@ import pythonIcon from '@/assets/python.svg'
 import { RustIcon } from '@/assets/RustIcon'
 import typescriptIcon from '@/assets/typescript.svg'
 import { QuickstartAgentHandoff } from '@/components/QuickstartAgentHandoff'
+import { QuickstartRecipeHeader, type QuickstartPreview } from '@/components/first-run/QuickstartRecipeHeader'
 import { CODING_AGENT_MARKS } from '@/assets/AgentLogos'
 import { QuickstartCopyButton } from '@/components/QuickstartCopyButton'
 import {
@@ -32,6 +33,7 @@ import {
   getOnboardingCodeExamples,
   getOnboardingInterfaces,
   renderOnboardingCodeExample,
+  renderOnboardingCodeSteps,
   type OnboardingInterface,
 } from '@/lib/onboarding-code-examples'
 import type { QuickstartGroup, QuickstartIconName, QuickstartInterfaceDefinition } from '@/lib/quickstart/types'
@@ -43,11 +45,10 @@ import {
   type ApiKeyResponse,
 } from '@boxlite-ai/api-client'
 import { Suspense, lazy, useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useAuth } from 'react-oidc-context'
 import { toast } from 'sonner'
 
-// Lazy so prism-react-renderer (syntax highlighting, ~130KB) stays out of the
-// first-paint bundle. CodeBlock only renders in step 2 of this dialog, which is
-// closed on load — the <pre> fallback below is never visible during startup.
+// Load the shared syntax highlighter only when a code example is displayed.
 const CodeBlock = lazy(() => import('@/components/CodeBlock'))
 
 interface OnboardingGuideDialogProps {
@@ -55,6 +56,8 @@ interface OnboardingGuideDialogProps {
   onOpenChange: (open: boolean) => void
   onProgressChange: (progress: OnboardingProgress) => void
   progress: OnboardingProgress
+  inline?: boolean
+  preview?: QuickstartPreview
 }
 
 const STAGES = [
@@ -183,7 +186,7 @@ function CornerMarks() {
   return (
     <span
       aria-hidden
-      className="pointer-events-none absolute inset-0 font-mono text-[11px] leading-none text-foreground"
+      className="pointer-events-none absolute inset-0 font-mono text-label leading-none text-foreground"
     >
       <span className="absolute -left-px -top-px">┌</span>
       <span className="absolute -right-px -top-px">┐</span>
@@ -222,7 +225,7 @@ function ScenarioHeader({
         <button
           type="button"
           onClick={onExpand}
-          className="text-[11.5px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          className="text-meta text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
         >
           Change
         </button>
@@ -304,6 +307,15 @@ function ScenarioHeader({
 
 const QUICKSTART_INTERFACES = getOnboardingInterfaces()
 const DEFAULT_INTERFACE = QUICKSTART_INTERFACES[0]?.id ?? 'python'
+const EXAMPLE_FILES: Record<string, string> = {
+  python: 'main.py',
+  typescript: 'index.mts',
+  go: 'main.go',
+  rust: 'src/main.rs',
+  c: 'main.c',
+  cli: 'quickstart.sh',
+  rest: 'quickstart-rest.sh',
+}
 // Multi-color brand marks ship as assets; single-color marks render inline so they
 // inherit `currentColor` and stay visible in both themes.
 const ICON_ASSETS: Partial<Record<QuickstartIconName, string>> = {
@@ -346,10 +358,26 @@ function QuickstartInterfaceIcon({
 function InterfacePicker({
   selected,
   onSelect,
+  quiet = false,
 }: {
   selected: OnboardingInterface
   onSelect: (id: OnboardingInterface) => void
+  quiet?: boolean
 }) {
+  if (quiet) {
+    return (
+      <Tabs value={selected} onValueChange={onSelect} className="min-w-0 max-w-full">
+        <TabsList variant="segmented" aria-label="SDK or CLI" className="h-auto flex-wrap">
+          {QUICKSTART_INTERFACES.map((item) => (
+            <TabsTrigger key={item.id} value={item.id} className="h-9 gap-1.5 px-3">
+              <QuickstartInterfaceIcon item={item} />
+              {item.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
+    )
+  }
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:gap-5">
       {GROUPS.map((group) => {
@@ -357,7 +385,7 @@ function InterfacePicker({
         if (items.length === 0) return null
         return (
           <div key={group.id} className="min-w-0">
-            <div className="mb-[9px] text-[9px] uppercase tracking-[1.5px] text-muted-foreground">{group.label}</div>
+            <div className="mb-[9px] text-label uppercase tracking-[1.5px] text-muted-foreground">{group.label}</div>
             <div className="flex flex-wrap gap-2">
               {items.map((item) => {
                 const on = selected === item.id
@@ -368,10 +396,15 @@ function InterfacePicker({
                     aria-pressed={on}
                     onClick={() => onSelect(item.id)}
                     className={cn(
-                      'flex min-h-[34px] items-center justify-center gap-2 border px-[12px] py-[7px] text-[12px] transition-colors',
-                      on
-                        ? 'border-foreground/45 bg-card font-semibold text-foreground'
-                        : 'border-border text-muted-foreground hover:text-foreground',
+                      'flex min-h-[34px] items-center justify-center gap-2 px-[12px] py-[7px] text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand',
+                      quiet
+                        ? on
+                          ? 'rounded-none bg-foreground/[0.07] font-semibold text-foreground'
+                          : 'rounded-none text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground'
+                        : on
+                          ? 'border-foreground/45 bg-card font-semibold text-foreground'
+                          : 'border-border text-muted-foreground hover:text-foreground',
+                      !quiet && 'border',
                     )}
                   >
                     <QuickstartInterfaceIcon item={item} />
@@ -392,20 +425,119 @@ function PrimaryBtn({ children, onClick }: { children: React.ReactNode; onClick:
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-2 bg-primary px-4 py-[9px] text-[12px] font-semibold text-primary-foreground transition-opacity hover:opacity-85"
+      className="inline-flex items-center gap-2 bg-primary px-4 py-[9px] text-meta font-semibold text-primary-foreground transition-opacity hover:opacity-85"
     >
       {children}
     </button>
   )
 }
 
-type CopyTarget = 'api-key' | 'install' | 'code'
+type CopyTarget = 'api-key' | 'install' | 'code' | 'creation' | 'execution' | 'preview'
 
-export function OnboardingGuideDialog({ open, onOpenChange, onProgressChange }: OnboardingGuideDialogProps) {
+function QuickstartCode({ code, language }: { code: string; language: string }) {
+  return (
+    <Suspense fallback={<pre className="overflow-auto whitespace-pre p-4 text-label leading-relaxed">{code}</pre>}>
+      <CodeBlock
+        code={code}
+        preserveWhitespace
+        language={language}
+        showCopy={false}
+        className="w-full rounded-none border-0 bg-transparent shadow-none"
+        codeAreaClassName="max-h-[280px] overflow-auto rounded-none px-4 pb-4 pt-1 pr-4 text-label leading-relaxed"
+      />
+    </Suspense>
+  )
+}
+
+function QuickstartStepHeading({ title }: { title: string }) {
+  const split = title.indexOf(' ')
+  return (
+    <h2 className="font-display text-sm font-semibold">
+      <span className="quickstart-step-number">{title.slice(0, split)}</span> {title.slice(split + 1)}
+    </h2>
+  )
+}
+
+function InlineCodeSteps({
+  language,
+  apiKey,
+  restApiUrl,
+  command,
+  copiedTarget,
+  onCopy,
+}: {
+  language: OnboardingInterface
+  apiKey?: string
+  restApiUrl: string
+  command?: { executable: string; args: string[] }
+  copiedTarget: CopyTarget | null
+  onCopy: (value: string, target: CopyTarget) => Promise<void>
+}) {
+  const parts = renderOnboardingCodeSteps(language, { apiKey, restApiUrl, command })
+  return (
+    <>
+      {(
+        [
+          {
+            id: 'creation',
+            title: '3. Create a Box',
+            note: `A Box is an isolated environment created from a container image. Start ${EXAMPLE_FILES[language]} with this section to create and start a named Box using the agent base image, or replace the image reference with your own.`,
+            code: parts.creation,
+          },
+          {
+            id: 'execution',
+            title: '4. Run code and commands',
+            note: 'Continue in the same file to run a command in your Box and check its result. Keep the Box running for the preview below.',
+            code: parts.execution,
+          },
+          {
+            id: 'preview',
+            title: '5. Create a preview',
+            note: 'Start a small web server on port 3000 and print its public preview URL. Open that URL in your browser to see Hello from BoxLite. Anyone with the URL can access this demo. The script leaves your Box running. Idle auto-stop still applies (15 minutes by default); manage it from Boxes.',
+            code: parts.preview,
+          },
+        ] as const
+      ).map((part, index) => (
+        <section key={part.id} className="quickstart-step min-w-0">
+          <QuickstartStepHeading title={part.title} />
+          <p className="mt-2 max-w-[900px] font-display text-xs leading-relaxed text-muted-foreground">{part.note}</p>
+          <div className="mt-4 overflow-hidden rounded-none bg-[hsl(var(--code-background))]">
+            <div className="flex items-center justify-between px-4 pb-1 pt-2">
+              <span className="text-label text-muted-foreground">
+                {EXAMPLE_FILES[language]} · part {index + 1}
+              </span>
+              <QuickstartCopyButton
+                quiet
+                copied={copiedTarget === part.id}
+                onClick={() => void onCopy(part.code, part.id)}
+              />
+            </div>
+            <QuickstartCode code={part.code} language={getOnboardingCodeExamples()[language].codeLanguage} />
+          </div>
+        </section>
+      ))}
+    </>
+  )
+}
+
+export function OnboardingGuideDialog(props: OnboardingGuideDialogProps) {
+  const { selectedOrganization } = useSelectedOrganization()
+  const userId = useAuth().user?.profile.sub
+  return <OnboardingGuideContent key={`${userId}:${selectedOrganization?.id}`} {...props} />
+}
+
+function OnboardingGuideContent({
+  open,
+  onOpenChange,
+  onProgressChange,
+  preview,
+  inline = false,
+}: OnboardingGuideDialogProps) {
   const { apiKeyApi } = useApi()
   const config = useConfig()
   const restApiUrl = getRestApiUrl(config.apiUrl, undefined, config.oidc.issuer)
   const { selectedOrganization, authenticatedUserHasPermission } = useSelectedOrganization()
+  const userId = useAuth().user?.profile.sub
   const canCreateApiKey = authenticatedUserHasPermission(OrganizationRolePermissionsEnum.WRITE_BOXES)
 
   // The two jobs are peers, but one of them has to be showing on open: a new
@@ -423,13 +555,19 @@ export function OnboardingGuideDialog({ open, onOpenChange, onProgressChange }: 
   const [keyName, setKeyName] = useState('')
   const [creating, setCreating] = useState(false)
   const [copiedTarget, setCopiedTarget] = useState<CopyTarget | null>(null)
+  const activeScenario = preview ? (preview.recipe.command ? 'untrusted-code' : 'publish') : scenario
 
   const codeExamples = getOnboardingCodeExamples()
   const activeExample = codeExamples[language] ?? codeExamples[DEFAULT_INTERFACE]
   const activeInterface = QUICKSTART_INTERFACES.find((item) => item.id === language) ?? QUICKSTART_INTERFACES[0]
   const renderedExample = useMemo(
-    () => renderOnboardingCodeExample(language, { apiKey: createdKey?.value, restApiUrl }),
-    [createdKey?.value, language, restApiUrl],
+    () =>
+      renderOnboardingCodeExample(language, {
+        apiKey: createdKey?.value,
+        restApiUrl,
+        command: preview?.recipe.command,
+      }),
+    [createdKey?.value, language, restApiUrl, preview?.recipe.command],
   )
   const apiKeyPermissions = useMemo(() => {
     if (!canCreateApiKey) return []
@@ -443,13 +581,20 @@ export function OnboardingGuideDialog({ open, onOpenChange, onProgressChange }: 
   useEffect(() => {
     if (open) {
       setScenario('publish')
+      setLanguage(DEFAULT_INTERFACE)
       setStep(0)
       setDone([false, false, false])
       setCreatedKey(null)
       setKeyName('')
       setCopiedTarget(null)
     }
-  }, [open])
+  }, [open, userId])
+
+  useEffect(() => {
+    // A different task needs its own completion, but the key and interface remain useful.
+    setDone((previous) => [previous[0], previous[1], false])
+    setCopiedTarget(null)
+  }, [preview?.recipe.id])
 
   const finished = done.every(Boolean)
 
@@ -493,293 +638,467 @@ export function OnboardingGuideDialog({ open, onOpenChange, onProgressChange }: 
     setTimeout(() => setCopiedTarget(null), 1400)
   }
 
+  if (inline)
+    return activeScenario === 'publish' ? (
+      <section>
+        <QuickstartAgentHandoff
+          composeRequest
+          restApiUrl={restApiUrl}
+          onProgressChange={onProgressChange}
+          onLeave={() => onOpenChange(false)}
+        />
+      </section>
+    ) : (
+      <section className="max-w-[1080px] font-mono">
+        <div className="quickstart-sequence min-w-0">
+          <section className="quickstart-step min-w-0">
+            <QuickstartStepHeading title="1. Get an API key" />
+            <p className="mt-2 max-w-[900px] font-display text-xs leading-relaxed text-muted-foreground">
+              An API key connects your local code to your BoxLite organization. Create one here, or set BOXLITE_API_KEY
+              in your terminal to use an existing key.
+            </p>
+            {createdKey ? (
+              <div className="mt-4 flex items-start gap-3 rounded-none bg-[hsl(var(--code-background))] p-3">
+                <code className="min-w-0 flex-1 break-all text-label leading-relaxed">{createdKey.value}</code>
+                <QuickstartCopyButton
+                  quiet
+                  copied={copiedTarget === 'api-key'}
+                  onClick={() => void copyText(createdKey.value ?? '', 'api-key')}
+                />
+              </div>
+            ) : (
+              <div className="mt-4 flex max-w-lg flex-wrap gap-2">
+                <input
+                  aria-label="Quickstart API key name"
+                  value={keyName}
+                  onChange={(event) => setKeyName(event.target.value)}
+                  placeholder="Key name (optional)"
+                  className="min-w-0 flex-1 rounded-none border border-border/60 bg-transparent px-3 py-2 font-display text-xs outline-none focus:border-brand"
+                />
+                <button
+                  type="button"
+                  disabled={creating || !canCreateApiKey}
+                  onClick={() => void handleCreateKey()}
+                  className="bg-primary px-3 py-2 text-xs text-primary-foreground disabled:opacity-50"
+                >
+                  {creating ? 'Creating…' : 'Create key'}
+                </button>
+              </div>
+            )}
+            {createdKey && (
+              <p className="mt-3 font-display text-xs text-muted-foreground">
+                Your key is included in the examples below.
+              </p>
+            )}
+          </section>
+          <section className="quickstart-step min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <QuickstartStepHeading title="2. Choose your SDK or CLI" />
+              <InterfacePicker quiet selected={language} onSelect={setLanguage} />
+            </div>
+            <p className="mt-2 max-w-[900px] font-display text-xs leading-relaxed text-muted-foreground">
+              {language === 'cli'
+                ? 'Install the BoxLite CLI to create and manage Boxes from your terminal. The commands below connect using your API key.'
+                : language === 'rest'
+                  ? 'Use curl and jq to call the BoxLite REST API directly, without an SDK. The requests below create a Box and execute a command using your API key.'
+                  : `Install the ${activeInterface.label} SDK in your local project to create Boxes, run commands and read results from your code. Run the installation command below in your terminal.`}
+            </p>
+            <div className="mt-4 flex items-start gap-2 rounded-none bg-[hsl(var(--code-background))] p-3">
+              <div className="min-w-0 flex-1">
+                <QuickstartCode code={activeExample.install} language="bash" />
+              </div>
+              <QuickstartCopyButton
+                quiet
+                copied={copiedTarget === 'install'}
+                onClick={() => void copyText(activeExample.install, 'install')}
+              />
+            </div>
+          </section>
+          <p className="font-display text-xs leading-relaxed text-muted-foreground">
+            Save parts 1–3 in order in <span className="font-mono text-foreground">{EXAMPLE_FILES[language]}</span>, or
+            use Copy full example below. Run the complete file once to create your Box and open a preview.
+          </p>
+          <InlineCodeSteps
+            language={language}
+            apiKey={createdKey?.value}
+            restApiUrl={restApiUrl}
+            command={preview?.recipe.command}
+            copiedTarget={copiedTarget}
+            onCopy={copyText}
+          />
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-none bg-[hsl(var(--code-background))] px-4 py-3">
+            <pre className="min-w-0 overflow-x-auto whitespace-pre-wrap break-words text-label leading-relaxed">
+              ${' '}
+              {language === 'cli'
+                ? 'bash quickstart.sh'
+                : activeExample.run.replace('BOXLITE_API_KEY=$KEY ', '').replace('your-api-url', restApiUrl)}
+            </pre>
+            <QuickstartCopyButton
+              quiet
+              label="Copy full example"
+              copied={copiedTarget === 'code'}
+              onClick={() =>
+                void copyText(
+                  renderOnboardingCodeSteps(language, {
+                    apiKey: createdKey?.value,
+                    restApiUrl,
+                    command: preview?.recipe.command,
+                  }).example,
+                  'code',
+                )
+              }
+            />
+          </div>
+        </div>
+      </section>
+    )
+
+  const content = (
+    <>
+      {' '}
+      {activeScenario === 'publish' ? (
+        <>
+          {preview ? (
+            <QuickstartRecipeHeader preview={preview} compact={false} />
+          ) : (
+            <ScenarioHeader scenario={scenario} onSelect={setScenario} />
+          )}
+
+          <div className="scrollbar-elevated min-h-0 flex-1 overflow-y-auto">
+            <QuickstartAgentHandoff
+              restApiUrl={restApiUrl}
+              onProgressChange={onProgressChange}
+              onLeave={() => onOpenChange(false)}
+            />
+          </div>
+          <div className="flex shrink-0 items-center justify-between border-t border-border px-8 py-4">
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              className="text-meta text-muted-foreground hover:text-foreground"
+            >
+              Maybe later
+            </button>
+            {preview && (
+              <button type="button" className="text-xs text-foreground hover:text-brand" onClick={preview.onConsole}>
+                Try in console →
+              </button>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          {preview ? (
+            <QuickstartRecipeHeader preview={preview} compact={step > 0} statusOnly={language === 'rest'} />
+          ) : (
+            <ScenarioHeader scenario={scenario} onSelect={setScenario} compact={step > 0} onExpand={() => setStep(0)} />
+          )}
+
+          {/* stage rail */}
+          <div className="flex shrink-0 items-center px-8 pb-4 pt-6">
+            {STAGES.map((s, i) => {
+              const isDone = done[i]
+              const active = step === i
+              return (
+                <div key={s.tag} className="flex flex-1 items-center last:flex-none">
+                  <button type="button" onClick={() => setStep(i)} className="flex flex-none items-center gap-[9px]">
+                    <span
+                      className={cn(
+                        'flex size-6 flex-none items-center justify-center rounded-full border-[1.5px] text-label font-bold transition-colors',
+                        isDone
+                          ? 'border-brand bg-brand text-white'
+                          : active
+                            ? 'border-brand text-brand'
+                            : 'border-border text-muted-foreground',
+                      )}
+                      style={active && !isDone ? { animation: 'qs-pulse 2s infinite' } : undefined}
+                    >
+                      {isDone ? '✓' : i + 1}
+                    </span>
+                    <span
+                      className={cn(
+                        'hidden whitespace-nowrap text-meta sm:inline',
+                        active ? 'font-semibold text-foreground' : isDone ? 'text-foreground' : 'text-muted-foreground',
+                      )}
+                    >
+                      {s.label}
+                    </span>
+                  </button>
+                  {i < STAGES.length - 1 && (
+                    <span
+                      className="mx-[10px] h-[1.5px] min-w-[12px] flex-1 transition-colors"
+                      style={{ background: done[i] ? 'hsl(var(--brand))' : 'hsl(var(--border))' }}
+                    />
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          {/* interface picker — spans steps 2 and 3, so it lives outside the step body */}
+          {step > 0 && (
+            <div className="shrink-0 border-t border-border px-8 py-4">
+              {preview && (
+                <label className="flex items-center gap-3 text-xs text-muted-foreground sm:hidden">
+                  Interface
+                  <select
+                    aria-label="SDK or interface"
+                    value={language}
+                    onChange={(event) => setLanguage(event.target.value)}
+                    className="h-10 min-w-0 flex-1 border border-border bg-background px-3 text-foreground"
+                  >
+                    {GROUPS.map((group) => (
+                      <optgroup key={group.id} label={group.label}>
+                        {QUICKSTART_INTERFACES.filter((item) => item.group === group.id).map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <div className={preview ? 'hidden sm:block' : undefined}>
+                <InterfacePicker selected={language} onSelect={setLanguage} />
+              </div>
+            </div>
+          )}
+
+          {/* body */}
+          <div
+            className={cn(
+              'scrollbar-elevated min-h-0 flex-1 border-t border-border',
+              step === 2 ? (preview ? 'overflow-y-auto sm:overflow-hidden' : 'overflow-hidden') : 'overflow-y-auto',
+            )}
+          >
+            {step === 0 && (
+              <div className="px-8 py-6" style={{ animation: 'stat-in .25s ease' }}>
+                <div className="mb-[9px] text-label uppercase tracking-[1.5px] text-muted-foreground">
+                  {createdKey ? 'Your API key' : 'Key name'}
+                </div>
+                <div className="flex items-center gap-[10px] border border-border bg-[hsl(var(--code-background))] px-[14px] py-3 focus-within:border-brand">
+                  <KeyRound className={cn('size-4 flex-none', createdKey ? 'text-brand' : 'text-muted-foreground')} />
+                  {createdKey ? (
+                    <span className="flex-1 break-all text-meta leading-relaxed text-foreground">
+                      {createdKey.value}
+                    </span>
+                  ) : (
+                    <input
+                      value={keyName}
+                      onChange={(e) => setKeyName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !creating) {
+                          void handleCreateKey()
+                        }
+                      }}
+                      placeholder={`${DEFAULT_QUICKSTART_API_KEY_NAME} (default)`}
+                      aria-label="Quickstart API key name"
+                      disabled={creating}
+                      className="min-w-0 flex-1 bg-transparent text-body tracking-[0.5px] text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                    />
+                  )}
+                  {createdKey ? (
+                    <QuickstartCopyButton
+                      copied={copiedTarget === 'api-key'}
+                      onClick={() => void copyText(createdKey.value, 'api-key')}
+                    />
+                  ) : null}
+                </div>
+                {!createdKey && (
+                  <div className="mt-[9px] text-meta leading-relaxed text-muted-foreground">
+                    Leave blank to use <span className="text-foreground">{DEFAULT_QUICKSTART_API_KEY_NAME}</span>.
+                  </div>
+                )}
+                {createdKey && (
+                  <div className="mt-[11px] flex items-start gap-2 text-meta leading-relaxed text-muted-foreground">
+                    <span className="flex-none text-brand">ⓘ</span>
+                    <span>
+                      Save this as <span className="text-foreground">BOXLITE_API_KEY</span> in your environment (e.g.{' '}
+                      <code className="text-foreground">export BOXLITE_API_KEY=…</code>) — the SDK reads it at runtime
+                      so the key never lives in your code.
+                    </span>
+                  </div>
+                )}
+                <div className="mt-4 flex items-center justify-between">
+                  {createdKey ? (
+                    <button
+                      type="button"
+                      onClick={handleCreateKey}
+                      className="text-label text-muted-foreground hover:text-foreground"
+                    >
+                      ↻ Regenerate
+                    </button>
+                  ) : (
+                    <span />
+                  )}
+                  {createdKey ? (
+                    <PrimaryBtn onClick={() => complete(0)}>
+                      {done[0] ? '✓ Secured · Next' : 'Copied · Next →'}
+                    </PrimaryBtn>
+                  ) : (
+                    <PrimaryBtn onClick={handleCreateKey}>{creating ? 'Creating…' : 'Create key'}</PrimaryBtn>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {step === 1 && (
+              <div className="px-8 py-6" style={{ animation: 'stat-in .25s ease' }}>
+                <div className="mb-[9px] text-label uppercase tracking-[1.5px] text-muted-foreground">
+                  {activeExample.setupLabel ?? 'Run in your local terminal'}
+                </div>
+                <div className="flex items-start gap-3 border border-border bg-[hsl(var(--code-background))] px-[14px] py-3">
+                  <span className="flex-none pt-[1px] text-success">$</span>
+                  <pre className="scrollbar-elevated min-w-0 flex-1 overflow-x-auto whitespace-pre text-body leading-relaxed text-foreground">
+                    {activeExample.install}
+                  </pre>
+                  <QuickstartCopyButton
+                    copied={copiedTarget === 'install'}
+                    onClick={() => void copyText(activeExample.install, 'install')}
+                  />
+                </div>
+                <div className="mt-[11px] flex items-start gap-2 text-meta leading-relaxed text-muted-foreground">
+                  <span className="flex-none text-brand">ⓘ</span>
+                  <span>
+                    {activeExample.setupDescription ?? (
+                      <>
+                        Run this command in your <span className="text-foreground">local development environment</span>{' '}
+                        to install the {activeInterface?.label} library. Continue once the install finishes.
+                      </>
+                    )}
+                  </span>
+                </div>
+                <div className="mt-4 flex justify-end">
+                  <PrimaryBtn onClick={() => complete(1)}>
+                    {done[1] ? '✓ Installed · Next' : 'Installed · Next →'}
+                  </PrimaryBtn>
+                </div>
+              </div>
+            )}
+
+            {step === 2 && (
+              <div
+                className={cn('flex min-h-0 flex-col px-8 py-6', preview ? 'h-auto sm:h-full' : 'h-full')}
+                style={{ animation: 'stat-in .25s ease' }}
+              >
+                <div className="mb-[9px] text-label uppercase tracking-[1.5px] text-muted-foreground">
+                  {preview
+                    ? `Save as ${EXAMPLE_FILES[language]} on your local machine`
+                    : 'Run this from your local machine'}
+                </div>
+                <div className={cn('relative min-h-0', preview ? 'h-[220px] flex-none sm:h-auto sm:flex-1' : 'flex-1')}>
+                  <Suspense
+                    fallback={
+                      <pre className="scrollbar-elevated h-full overflow-auto whitespace-pre rounded-none p-3 pr-24 text-meta leading-relaxed">
+                        {renderedExample}
+                      </pre>
+                    }
+                  >
+                    <CodeBlock
+                      code={renderedExample}
+                      language={activeExample.codeLanguage}
+                      showCopy={false}
+                      className="h-full rounded-none"
+                      codeAreaClassName="h-full overflow-auto whitespace-pre pr-24 text-meta leading-relaxed"
+                    />
+                  </Suspense>
+                  <QuickstartCopyButton
+                    copied={copiedTarget === 'code'}
+                    onClick={() => void copyText(renderedExample, 'code')}
+                    className="absolute right-2 top-2.5"
+                  />
+                </div>
+                <div className="mt-[12px] flex items-start gap-2 text-meta leading-relaxed text-muted-foreground">
+                  <span className="flex-none text-brand">ⓘ</span>
+                  <span>{activeExample.executionDescription}</span>
+                </div>
+                {preview && (
+                  <div className="mt-3 flex items-start gap-3 border border-border px-3 py-2 text-label">
+                    <span className="pt-0.5 text-muted-foreground">$</span>
+                    <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-words">
+                      {language === 'cli'
+                        ? 'bash quickstart.sh'
+                        : activeExample.run.replace('BOXLITE_API_KEY=$KEY ', '').replace('your-api-url', restApiUrl)}
+                    </pre>
+                  </div>
+                )}
+                <div className="mt-4 flex items-center justify-end">
+                  <PrimaryBtn onClick={() => complete(2)}>
+                    {done[2] ? '✓ Done' : preview ? 'Finish walkthrough' : "I've run it"}
+                  </PrimaryBtn>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* footer */}
+          <div className="flex shrink-0 items-center justify-between border-t border-border px-8 py-4">
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              className="text-meta text-muted-foreground hover:text-foreground"
+            >
+              Maybe later
+            </button>
+            {preview && !finished && (
+              <button type="button" className="text-xs text-foreground hover:text-brand" onClick={preview.onConsole}>
+                Try in console →
+              </button>
+            )}
+            {finished && <PrimaryBtn onClick={() => onOpenChange(false)}>Open Fleet →</PrimaryBtn>}
+          </div>
+
+          {/* finale */}
+          {finished && !inline && (
+            <div
+              className="pointer-events-none absolute inset-0 z-[55] overflow-hidden"
+              style={{ background: 'hsl(var(--background) / 0.82)' }}
+            >
+              {Array.from({ length: 28 }).map((_, i) => (
+                <span
+                  key={i}
+                  className="absolute top-[-20px] size-[7px]"
+                  style={{
+                    left: `${(i * 37) % 100}%`,
+                    background: i % 2 ? 'hsl(var(--success))' : 'hsl(var(--foreground))',
+                    opacity: 0.9,
+                    animation: `qs-fall ${(1.4 + (i % 5) * 0.24).toFixed(2)}s ${((i % 6) * 0.1).toFixed(2)}s ease-in forwards`,
+                  }}
+                />
+              ))}
+              <div
+                className="absolute left-1/2 top-[28%] w-full -translate-x-1/2 text-center"
+                style={{ animation: 'stat-in .4s ease' }}
+              >
+                <div className="text-label uppercase tracking-[4px] text-success">
+                  ✓ {preview ? 'Walkthrough complete' : 'Mission complete'}
+                </div>
+                <div className="mt-[10px] text-page font-bold tracking-[-1.5px]">
+                  {preview ? 'Ready to build.' : 'Box is live.'}
+                </div>
+                <div className="mt-[10px] text-meta text-muted-foreground">
+                  {preview
+                    ? 'Continue in your terminal to create your first Box.'
+                    : 'You shipped your first Box from code in three steps.'}
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </>
+  )
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        // The page behind is a live inventory — pulsing counts, a refreshing
-        // table. Dimming alone leaves it legible, and an onboarding screen
-        // should not compete with the thing it is onboarding you into.
         overlay={<DialogOverlay className="bg-background/70 backdrop-blur-md" />}
         className={cn(
           'flex max-h-[92vh] flex-col gap-0 overflow-hidden p-0 font-mono sm:max-w-[720px]',
-          scenario === 'untrusted-code' && step === 2 && 'h-[92vh]',
+          activeScenario === 'untrusted-code' && step === 2 && 'h-[92vh]',
         )}
       >
-        {scenario === 'publish' ? (
-          <>
-            <ScenarioHeader scenario={scenario} onSelect={setScenario} />
-
-            <div className="scrollbar-elevated min-h-0 flex-1 overflow-y-auto">
-              <QuickstartAgentHandoff
-                restApiUrl={restApiUrl}
-                onProgressChange={onProgressChange}
-                onLeave={() => onOpenChange(false)}
-              />
-            </div>
-            <div className="flex shrink-0 items-center border-t border-border px-8 py-4">
-              <button
-                type="button"
-                onClick={() => onOpenChange(false)}
-                className="text-[12px] text-muted-foreground hover:text-foreground"
-              >
-                Maybe later
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <ScenarioHeader scenario={scenario} onSelect={setScenario} compact={step > 0} onExpand={() => setStep(0)} />
-
-            {/* stage rail */}
-            <div className="flex shrink-0 items-center px-8 pb-4 pt-6">
-              {STAGES.map((s, i) => {
-                const isDone = done[i]
-                const active = step === i
-                return (
-                  <div key={s.tag} className="flex flex-1 items-center last:flex-none">
-                    <button type="button" onClick={() => setStep(i)} className="flex flex-none items-center gap-[9px]">
-                      <span
-                        className={cn(
-                          'flex size-6 flex-none items-center justify-center rounded-full border-[1.5px] text-[11px] font-bold transition-colors',
-                          isDone
-                            ? 'border-brand bg-brand text-white'
-                            : active
-                              ? 'border-brand text-brand'
-                              : 'border-border text-muted-foreground',
-                        )}
-                        style={active && !isDone ? { animation: 'qs-pulse 2s infinite' } : undefined}
-                      >
-                        {isDone ? '✓' : i + 1}
-                      </span>
-                      <span
-                        className={cn(
-                          'hidden whitespace-nowrap text-[12px] sm:inline',
-                          active
-                            ? 'font-semibold text-foreground'
-                            : isDone
-                              ? 'text-foreground'
-                              : 'text-muted-foreground',
-                        )}
-                      >
-                        {s.label}
-                      </span>
-                    </button>
-                    {i < STAGES.length - 1 && (
-                      <span
-                        className="mx-[10px] h-[1.5px] min-w-[12px] flex-1 transition-colors"
-                        style={{ background: done[i] ? 'hsl(var(--brand))' : 'hsl(var(--border))' }}
-                      />
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-
-            {/* interface picker — spans steps 2 and 3, so it lives outside the step body */}
-            {step > 0 && (
-              <div className="shrink-0 border-t border-border px-8 py-4">
-                <InterfacePicker selected={language} onSelect={setLanguage} />
-              </div>
-            )}
-
-            {/* body */}
-            <div
-              className={cn(
-                'scrollbar-elevated min-h-0 flex-1 border-t border-border',
-                step === 2 ? 'overflow-hidden' : 'overflow-y-auto',
-              )}
-            >
-              {step === 0 && (
-                <div className="px-8 py-6" style={{ animation: 'stat-in .25s ease' }}>
-                  <div className="mb-[9px] text-[9px] uppercase tracking-[1.5px] text-muted-foreground">
-                    {createdKey ? 'Your API key' : 'Key name'}
-                  </div>
-                  <div className="flex items-center gap-[10px] border border-border bg-[hsl(var(--code-background))] px-[14px] py-3 focus-within:border-brand">
-                    <KeyRound className={cn('size-4 flex-none', createdKey ? 'text-brand' : 'text-muted-foreground')} />
-                    {createdKey ? (
-                      <span className="flex-1 break-all text-[11.5px] leading-relaxed text-foreground">
-                        {createdKey.value}
-                      </span>
-                    ) : (
-                      <input
-                        value={keyName}
-                        onChange={(e) => setKeyName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !creating) {
-                            void handleCreateKey()
-                          }
-                        }}
-                        placeholder={`${DEFAULT_QUICKSTART_API_KEY_NAME} (default)`}
-                        aria-label="Quickstart API key name"
-                        disabled={creating}
-                        className="min-w-0 flex-1 bg-transparent text-[13px] tracking-[0.5px] text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
-                      />
-                    )}
-                    {createdKey ? (
-                      <QuickstartCopyButton
-                        copied={copiedTarget === 'api-key'}
-                        onClick={() => void copyText(createdKey.value, 'api-key')}
-                      />
-                    ) : null}
-                  </div>
-                  {!createdKey && (
-                    <div className="mt-[9px] text-[11.5px] leading-relaxed text-muted-foreground">
-                      Leave blank to use <span className="text-foreground">{DEFAULT_QUICKSTART_API_KEY_NAME}</span>.
-                    </div>
-                  )}
-                  {createdKey && (
-                    <div className="mt-[11px] flex items-start gap-2 text-[11.5px] leading-relaxed text-muted-foreground">
-                      <span className="flex-none text-brand">ⓘ</span>
-                      <span>
-                        Save this as <span className="text-foreground">BOXLITE_API_KEY</span> in your environment (e.g.{' '}
-                        <code className="text-foreground">export BOXLITE_API_KEY=…</code>) — the SDK reads it at runtime
-                        so the key never lives in your code.
-                      </span>
-                    </div>
-                  )}
-                  <div className="mt-4 flex items-center justify-between">
-                    {createdKey ? (
-                      <button
-                        type="button"
-                        onClick={handleCreateKey}
-                        className="text-[11px] text-muted-foreground hover:text-foreground"
-                      >
-                        ↻ Regenerate
-                      </button>
-                    ) : (
-                      <span />
-                    )}
-                    {createdKey ? (
-                      <PrimaryBtn onClick={() => complete(0)}>
-                        {done[0] ? '✓ Secured · Next' : 'Copied · Next →'}
-                      </PrimaryBtn>
-                    ) : (
-                      <PrimaryBtn onClick={handleCreateKey}>{creating ? 'Creating…' : 'Create key'}</PrimaryBtn>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {step === 1 && (
-                <div className="px-8 py-6" style={{ animation: 'stat-in .25s ease' }}>
-                  <div className="mb-[9px] text-[9px] uppercase tracking-[1.5px] text-muted-foreground">
-                    {activeExample.setupLabel ?? 'Run in your local terminal'}
-                  </div>
-                  <div className="flex items-start gap-3 border border-border bg-[hsl(var(--code-background))] px-[14px] py-3">
-                    <span className="flex-none pt-[1px] text-success">$</span>
-                    <pre className="scrollbar-elevated min-w-0 flex-1 overflow-x-auto whitespace-pre text-[13px] leading-relaxed text-foreground">
-                      {activeExample.install}
-                    </pre>
-                    <QuickstartCopyButton
-                      copied={copiedTarget === 'install'}
-                      onClick={() => void copyText(activeExample.install, 'install')}
-                    />
-                  </div>
-                  <div className="mt-[11px] flex items-start gap-2 text-[11.5px] leading-relaxed text-muted-foreground">
-                    <span className="flex-none text-brand">ⓘ</span>
-                    <span>
-                      {activeExample.setupDescription ?? (
-                        <>
-                          Run this command in your{' '}
-                          <span className="text-foreground">local development environment</span> to install the{' '}
-                          {activeInterface?.label} library. Continue once the install finishes.
-                        </>
-                      )}
-                    </span>
-                  </div>
-                  <div className="mt-4 flex justify-end">
-                    <PrimaryBtn onClick={() => complete(1)}>
-                      {done[1] ? '✓ Installed · Next' : 'Installed · Next →'}
-                    </PrimaryBtn>
-                  </div>
-                </div>
-              )}
-
-              {step === 2 && (
-                <div className="flex h-full min-h-0 flex-col px-8 py-6" style={{ animation: 'stat-in .25s ease' }}>
-                  <div className="mb-[9px] text-[9px] uppercase tracking-[1.5px] text-muted-foreground">
-                    Run this from your local machine
-                  </div>
-                  <div className="relative min-h-0 flex-1">
-                    <Suspense
-                      fallback={
-                        <pre className="scrollbar-elevated h-full overflow-auto whitespace-pre rounded-none p-3 pr-24 text-[11.5px] leading-relaxed">
-                          {renderedExample}
-                        </pre>
-                      }
-                    >
-                      <CodeBlock
-                        code={renderedExample}
-                        language={activeExample.codeLanguage}
-                        showCopy={false}
-                        className="h-full rounded-none"
-                        codeAreaClassName="h-full overflow-auto whitespace-pre pr-24 text-[11.5px] leading-relaxed"
-                      />
-                    </Suspense>
-                    <QuickstartCopyButton
-                      copied={copiedTarget === 'code'}
-                      onClick={() => void copyText(renderedExample, 'code')}
-                      className="absolute right-2 top-2.5"
-                    />
-                  </div>
-                  <div className="mt-[12px] flex items-start gap-2 text-[11.5px] leading-relaxed text-muted-foreground">
-                    <span className="flex-none text-brand">ⓘ</span>
-                    <span>
-                      {activeExample.executionDescription} Run it in your terminal with the install command from the
-                      previous step.
-                    </span>
-                  </div>
-                  <div className="mt-4 flex items-center justify-end">
-                    <PrimaryBtn onClick={() => complete(2)}>{done[2] ? '✓ Done' : "I've run it"}</PrimaryBtn>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* footer */}
-            <div className="flex shrink-0 items-center justify-between border-t border-border px-8 py-4">
-              <button
-                type="button"
-                onClick={() => onOpenChange(false)}
-                className="text-[12px] text-muted-foreground hover:text-foreground"
-              >
-                Maybe later
-              </button>
-              {finished && <PrimaryBtn onClick={() => onOpenChange(false)}>Open Fleet →</PrimaryBtn>}
-            </div>
-
-            {/* finale */}
-            {finished && (
-              <div
-                className="pointer-events-none absolute inset-0 z-[55] overflow-hidden"
-                style={{ background: 'hsl(var(--background) / 0.82)' }}
-              >
-                {Array.from({ length: 28 }).map((_, i) => (
-                  <span
-                    key={i}
-                    className="absolute top-[-20px] size-[7px]"
-                    style={{
-                      left: `${(i * 37) % 100}%`,
-                      background: i % 2 ? 'hsl(var(--success))' : 'hsl(var(--foreground))',
-                      opacity: 0.9,
-                      animation: `qs-fall ${(1.4 + (i % 5) * 0.24).toFixed(2)}s ${((i % 6) * 0.1).toFixed(2)}s ease-in forwards`,
-                    }}
-                  />
-                ))}
-                <div
-                  className="absolute left-1/2 top-[28%] w-full -translate-x-1/2 text-center"
-                  style={{ animation: 'stat-in .4s ease' }}
-                >
-                  <div className="text-[10px] uppercase tracking-[4px] text-success">✓ Mission complete</div>
-                  <div className="mt-[10px] text-[34px] font-bold tracking-[-1.5px]">Box is live.</div>
-                  <div className="mt-[10px] text-[12.5px] text-muted-foreground">
-                    You shipped your first Box from code in three steps.
-                  </div>
-                </div>
-              </div>
-            )}
-          </>
-        )}
+        {content}
       </DialogContent>
     </Dialog>
   )

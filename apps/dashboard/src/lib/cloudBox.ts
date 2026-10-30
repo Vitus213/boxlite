@@ -40,6 +40,8 @@ export type CreateBoxParams = {
   name?: string
   image?: string
   user?: string
+  entrypoint?: string[]
+  cmd?: string[]
   envVars?: Record<string, string>
   network?: BoxApiNetworkSpec
   resources?: Resources
@@ -58,6 +60,8 @@ export type BoxApiCreateRequest = {
   disk_size_gb?: number
   env?: Record<string, string>
   user?: string
+  entrypoint?: string[]
+  cmd?: string[]
   network?: BoxApiNetworkSpec
   auto_stop?: number
   auto_delete?: number
@@ -88,6 +92,8 @@ export function toBoxApiCreateRequest(params?: CreateBoxParams): BoxApiCreateReq
     name: p.name,
     image: p.image,
     user: p.user,
+    entrypoint: p.entrypoint,
+    cmd: p.cmd,
     env: p.envVars,
     cpus: p.resources?.cpu,
     // The dashboard form works in GiB; the Box API contract takes MiB.

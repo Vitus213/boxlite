@@ -10,6 +10,7 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from ..exec import ExecResult
+from ._agents import SyncAgents
 
 if TYPE_CHECKING:
     from ..boxlite import TunnelOptions
@@ -40,6 +41,11 @@ class SyncSimpleBox:
                 result = box.exec("ls", "-la")
                 print(result.stdout)
     """
+
+    @property
+    def agents(self) -> SyncAgents:
+        """Get the agent namespace without starting the Box."""
+        return SyncAgents()
 
     def __init__(
         self,

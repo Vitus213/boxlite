@@ -13,8 +13,12 @@
  */
 
 
+// May contain unused imports in some cases
+// @ts-ignore
+import type { OnboardingDto } from './onboarding-dto';
 
 export interface Organization {
+    'onboarding'?: OnboardingDto | null;
     /**
      * Organization ID
      */

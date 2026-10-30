@@ -88,6 +88,19 @@ type OrganizationsAPI interface {
 	CreateOrganizationRoleExecute(r OrganizationsAPICreateOrganizationRoleRequest) (*OrganizationRole, *http.Response, error)
 
 	/*
+	CreateQuickstartHandoff Prepare an immutable prompt handoff
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param organizationId
+	@return OrganizationsAPICreateQuickstartHandoffRequest
+	*/
+	CreateQuickstartHandoff(ctx context.Context, organizationId string) OrganizationsAPICreateQuickstartHandoffRequest
+
+	// CreateQuickstartHandoffExecute executes the request
+	//  @return PromptHandoffDto
+	CreateQuickstartHandoffExecute(r OrganizationsAPICreateQuickstartHandoffRequest) (*PromptHandoffDto, *http.Response, error)
+
+	/*
 	CreateRegion Create a new region
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
@@ -200,6 +213,19 @@ type OrganizationsAPI interface {
 	GetOrganizationInvitationsCountForAuthenticatedUserExecute(r OrganizationsAPIGetOrganizationInvitationsCountForAuthenticatedUserRequest) (float32, *http.Response, error)
 
 	/*
+	GetOrganizationOnboarding Read organization onboarding answers
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param organizationId
+	@return OrganizationsAPIGetOrganizationOnboardingRequest
+	*/
+	GetOrganizationOnboarding(ctx context.Context, organizationId string) OrganizationsAPIGetOrganizationOnboardingRequest
+
+	// GetOrganizationOnboardingExecute executes the request
+	//  @return OnboardingDto
+	GetOrganizationOnboardingExecute(r OrganizationsAPIGetOrganizationOnboardingRequest) (*OnboardingDto, *http.Response, error)
+
+	/*
 	GetOrganizationOtelConfigByBoxAuthToken Get organization OTEL config by box auth token
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
@@ -224,6 +250,19 @@ type OrganizationsAPI interface {
 	// GetOrganizationReferralCodeExecute executes the request
 	//  @return OrganizationReferralCode
 	GetOrganizationReferralCodeExecute(r OrganizationsAPIGetOrganizationReferralCodeRequest) (*OrganizationReferralCode, *http.Response, error)
+
+	/*
+	GetQuickstartPrompt Read your prompt draft in this organization
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param organizationId
+	@return OrganizationsAPIGetQuickstartPromptRequest
+	*/
+	GetQuickstartPrompt(ctx context.Context, organizationId string) OrganizationsAPIGetQuickstartPromptRequest
+
+	// GetQuickstartPromptExecute executes the request
+	//  @return PromptDraftDto
+	GetQuickstartPromptExecute(r OrganizationsAPIGetQuickstartPromptRequest) (*PromptDraftDto, *http.Response, error)
 
 	/*
 	GetRegionById Get region by ID
@@ -326,6 +365,20 @@ type OrganizationsAPI interface {
 	ListOrganizationsExecute(r OrganizationsAPIListOrganizationsRequest) ([]Organization, *http.Response, error)
 
 	/*
+	MarkQuickstartHandoffCopied Record successful clipboard copy
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param organizationId
+	@param requestId
+	@return OrganizationsAPIMarkQuickstartHandoffCopiedRequest
+	*/
+	MarkQuickstartHandoffCopied(ctx context.Context, organizationId string, requestId string) OrganizationsAPIMarkQuickstartHandoffCopiedRequest
+
+	// MarkQuickstartHandoffCopiedExecute executes the request
+	//  @return PromptHandoffDto
+	MarkQuickstartHandoffCopiedExecute(r OrganizationsAPIMarkQuickstartHandoffCopiedRequest) (*PromptHandoffDto, *http.Response, error)
+
+	/*
 	RegenerateProxyApiKey Regenerate proxy API key for a region
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
@@ -337,6 +390,32 @@ type OrganizationsAPI interface {
 	// RegenerateProxyApiKeyExecute executes the request
 	//  @return RegenerateApiKeyResponse
 	RegenerateProxyApiKeyExecute(r OrganizationsAPIRegenerateProxyApiKeyRequest) (*RegenerateApiKeyResponse, *http.Response, error)
+
+	/*
+	SaveOrganizationOnboarding Save organization onboarding answers
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param organizationId
+	@return OrganizationsAPISaveOrganizationOnboardingRequest
+	*/
+	SaveOrganizationOnboarding(ctx context.Context, organizationId string) OrganizationsAPISaveOrganizationOnboardingRequest
+
+	// SaveOrganizationOnboardingExecute executes the request
+	//  @return OnboardingDto
+	SaveOrganizationOnboardingExecute(r OrganizationsAPISaveOrganizationOnboardingRequest) (*OnboardingDto, *http.Response, error)
+
+	/*
+	SaveQuickstartPrompt Save your prompt draft with revision checking
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param organizationId
+	@return OrganizationsAPISaveQuickstartPromptRequest
+	*/
+	SaveQuickstartPrompt(ctx context.Context, organizationId string) OrganizationsAPISaveQuickstartPromptRequest
+
+	// SaveQuickstartPromptExecute executes the request
+	//  @return PromptDraftDto
+	SaveQuickstartPromptExecute(r OrganizationsAPISaveQuickstartPromptRequest) (*PromptDraftDto, *http.Response, error)
 
 	/*
 	SetOrganizationDefaultRegion Set default region for organization
@@ -959,6 +1038,118 @@ func (a *OrganizationsAPIService) CreateOrganizationRoleExecute(r OrganizationsA
 	}
 	// body params
 	localVarPostBody = r.createOrganizationRole
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type OrganizationsAPICreateQuickstartHandoffRequest struct {
+	ctx context.Context
+	ApiService OrganizationsAPI
+	organizationId string
+	createPromptHandoffDto *CreatePromptHandoffDto
+}
+
+func (r OrganizationsAPICreateQuickstartHandoffRequest) CreatePromptHandoffDto(createPromptHandoffDto CreatePromptHandoffDto) OrganizationsAPICreateQuickstartHandoffRequest {
+	r.createPromptHandoffDto = &createPromptHandoffDto
+	return r
+}
+
+func (r OrganizationsAPICreateQuickstartHandoffRequest) Execute() (*PromptHandoffDto, *http.Response, error) {
+	return r.ApiService.CreateQuickstartHandoffExecute(r)
+}
+
+/*
+CreateQuickstartHandoff Prepare an immutable prompt handoff
+
+ @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+ @param organizationId
+ @return OrganizationsAPICreateQuickstartHandoffRequest
+*/
+func (a *OrganizationsAPIService) CreateQuickstartHandoff(ctx context.Context, organizationId string) OrganizationsAPICreateQuickstartHandoffRequest {
+	return OrganizationsAPICreateQuickstartHandoffRequest{
+		ApiService: a,
+		ctx: ctx,
+		organizationId: organizationId,
+	}
+}
+
+// Execute executes the request
+//  @return PromptHandoffDto
+func (a *OrganizationsAPIService) CreateQuickstartHandoffExecute(r OrganizationsAPICreateQuickstartHandoffRequest) (*PromptHandoffDto, *http.Response, error) {
+	var (
+		localVarHTTPMethod   = http.MethodPost
+		localVarPostBody     interface{}
+		formFiles            []formFile
+		localVarReturnValue  *PromptHandoffDto
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "OrganizationsAPIService.CreateQuickstartHandoff")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/organizations/{organizationId}/quickstart/handoffs"
+	localVarPath = strings.Replace(localVarPath, "{"+"organizationId"+"}", url.PathEscape(parameterValueToString(r.organizationId, "organizationId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.createPromptHandoffDto == nil {
+		return localVarReturnValue, nil, reportError("createPromptHandoffDto is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.createPromptHandoffDto
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
 		return localVarReturnValue, nil, err
@@ -1881,6 +2072,107 @@ func (a *OrganizationsAPIService) GetOrganizationInvitationsCountForAuthenticate
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type OrganizationsAPIGetOrganizationOnboardingRequest struct {
+	ctx context.Context
+	ApiService OrganizationsAPI
+	organizationId string
+}
+
+func (r OrganizationsAPIGetOrganizationOnboardingRequest) Execute() (*OnboardingDto, *http.Response, error) {
+	return r.ApiService.GetOrganizationOnboardingExecute(r)
+}
+
+/*
+GetOrganizationOnboarding Read organization onboarding answers
+
+ @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+ @param organizationId
+ @return OrganizationsAPIGetOrganizationOnboardingRequest
+*/
+func (a *OrganizationsAPIService) GetOrganizationOnboarding(ctx context.Context, organizationId string) OrganizationsAPIGetOrganizationOnboardingRequest {
+	return OrganizationsAPIGetOrganizationOnboardingRequest{
+		ApiService: a,
+		ctx: ctx,
+		organizationId: organizationId,
+	}
+}
+
+// Execute executes the request
+//  @return OnboardingDto
+func (a *OrganizationsAPIService) GetOrganizationOnboardingExecute(r OrganizationsAPIGetOrganizationOnboardingRequest) (*OnboardingDto, *http.Response, error) {
+	var (
+		localVarHTTPMethod   = http.MethodGet
+		localVarPostBody     interface{}
+		formFiles            []formFile
+		localVarReturnValue  *OnboardingDto
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "OrganizationsAPIService.GetOrganizationOnboarding")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/organizations/{organizationId}/onboarding"
+	localVarPath = strings.Replace(localVarPath, "{"+"organizationId"+"}", url.PathEscape(parameterValueToString(r.organizationId, "organizationId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type OrganizationsAPIGetOrganizationOtelConfigByBoxAuthTokenRequest struct {
 	ctx context.Context
 	ApiService OrganizationsAPI
@@ -2023,6 +2315,107 @@ func (a *OrganizationsAPIService) GetOrganizationReferralCodeExecute(r Organizat
 	}
 
 	localVarPath := localBasePath + "/organizations/{organizationId}/referral-code"
+	localVarPath = strings.Replace(localVarPath, "{"+"organizationId"+"}", url.PathEscape(parameterValueToString(r.organizationId, "organizationId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type OrganizationsAPIGetQuickstartPromptRequest struct {
+	ctx context.Context
+	ApiService OrganizationsAPI
+	organizationId string
+}
+
+func (r OrganizationsAPIGetQuickstartPromptRequest) Execute() (*PromptDraftDto, *http.Response, error) {
+	return r.ApiService.GetQuickstartPromptExecute(r)
+}
+
+/*
+GetQuickstartPrompt Read your prompt draft in this organization
+
+ @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+ @param organizationId
+ @return OrganizationsAPIGetQuickstartPromptRequest
+*/
+func (a *OrganizationsAPIService) GetQuickstartPrompt(ctx context.Context, organizationId string) OrganizationsAPIGetQuickstartPromptRequest {
+	return OrganizationsAPIGetQuickstartPromptRequest{
+		ApiService: a,
+		ctx: ctx,
+		organizationId: organizationId,
+	}
+}
+
+// Execute executes the request
+//  @return PromptDraftDto
+func (a *OrganizationsAPIService) GetQuickstartPromptExecute(r OrganizationsAPIGetQuickstartPromptRequest) (*PromptDraftDto, *http.Response, error) {
+	var (
+		localVarHTTPMethod   = http.MethodGet
+		localVarPostBody     interface{}
+		formFiles            []formFile
+		localVarReturnValue  *PromptDraftDto
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "OrganizationsAPIService.GetQuickstartPrompt")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/organizations/{organizationId}/quickstart/prompt"
 	localVarPath = strings.Replace(localVarPath, "{"+"organizationId"+"}", url.PathEscape(parameterValueToString(r.organizationId, "organizationId")), -1)
 
 	localVarHeaderParams := make(map[string]string)
@@ -2888,6 +3281,111 @@ func (a *OrganizationsAPIService) ListOrganizationsExecute(r OrganizationsAPILis
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type OrganizationsAPIMarkQuickstartHandoffCopiedRequest struct {
+	ctx context.Context
+	ApiService OrganizationsAPI
+	organizationId string
+	requestId string
+}
+
+func (r OrganizationsAPIMarkQuickstartHandoffCopiedRequest) Execute() (*PromptHandoffDto, *http.Response, error) {
+	return r.ApiService.MarkQuickstartHandoffCopiedExecute(r)
+}
+
+/*
+MarkQuickstartHandoffCopied Record successful clipboard copy
+
+ @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+ @param organizationId
+ @param requestId
+ @return OrganizationsAPIMarkQuickstartHandoffCopiedRequest
+*/
+func (a *OrganizationsAPIService) MarkQuickstartHandoffCopied(ctx context.Context, organizationId string, requestId string) OrganizationsAPIMarkQuickstartHandoffCopiedRequest {
+	return OrganizationsAPIMarkQuickstartHandoffCopiedRequest{
+		ApiService: a,
+		ctx: ctx,
+		organizationId: organizationId,
+		requestId: requestId,
+	}
+}
+
+// Execute executes the request
+//  @return PromptHandoffDto
+func (a *OrganizationsAPIService) MarkQuickstartHandoffCopiedExecute(r OrganizationsAPIMarkQuickstartHandoffCopiedRequest) (*PromptHandoffDto, *http.Response, error) {
+	var (
+		localVarHTTPMethod   = http.MethodPatch
+		localVarPostBody     interface{}
+		formFiles            []formFile
+		localVarReturnValue  *PromptHandoffDto
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "OrganizationsAPIService.MarkQuickstartHandoffCopied")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/organizations/{organizationId}/quickstart/handoffs/{requestId}/copied"
+	localVarPath = strings.Replace(localVarPath, "{"+"organizationId"+"}", url.PathEscape(parameterValueToString(r.organizationId, "organizationId")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"requestId"+"}", url.PathEscape(parameterValueToString(r.requestId, "requestId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type OrganizationsAPIRegenerateProxyApiKeyRequest struct {
 	ctx context.Context
 	ApiService OrganizationsAPI
@@ -2962,6 +3460,230 @@ func (a *OrganizationsAPIService) RegenerateProxyApiKeyExecute(r OrganizationsAP
 	if r.xBoxLiteOrganizationID != nil {
 		parameterAddToHeaderOrQuery(localVarHeaderParams, "X-BoxLite-Organization-ID", r.xBoxLiteOrganizationID, "simple", "")
 	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type OrganizationsAPISaveOrganizationOnboardingRequest struct {
+	ctx context.Context
+	ApiService OrganizationsAPI
+	organizationId string
+	saveOnboardingDto *SaveOnboardingDto
+}
+
+func (r OrganizationsAPISaveOrganizationOnboardingRequest) SaveOnboardingDto(saveOnboardingDto SaveOnboardingDto) OrganizationsAPISaveOrganizationOnboardingRequest {
+	r.saveOnboardingDto = &saveOnboardingDto
+	return r
+}
+
+func (r OrganizationsAPISaveOrganizationOnboardingRequest) Execute() (*OnboardingDto, *http.Response, error) {
+	return r.ApiService.SaveOrganizationOnboardingExecute(r)
+}
+
+/*
+SaveOrganizationOnboarding Save organization onboarding answers
+
+ @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+ @param organizationId
+ @return OrganizationsAPISaveOrganizationOnboardingRequest
+*/
+func (a *OrganizationsAPIService) SaveOrganizationOnboarding(ctx context.Context, organizationId string) OrganizationsAPISaveOrganizationOnboardingRequest {
+	return OrganizationsAPISaveOrganizationOnboardingRequest{
+		ApiService: a,
+		ctx: ctx,
+		organizationId: organizationId,
+	}
+}
+
+// Execute executes the request
+//  @return OnboardingDto
+func (a *OrganizationsAPIService) SaveOrganizationOnboardingExecute(r OrganizationsAPISaveOrganizationOnboardingRequest) (*OnboardingDto, *http.Response, error) {
+	var (
+		localVarHTTPMethod   = http.MethodPut
+		localVarPostBody     interface{}
+		formFiles            []formFile
+		localVarReturnValue  *OnboardingDto
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "OrganizationsAPIService.SaveOrganizationOnboarding")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/organizations/{organizationId}/onboarding"
+	localVarPath = strings.Replace(localVarPath, "{"+"organizationId"+"}", url.PathEscape(parameterValueToString(r.organizationId, "organizationId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.saveOnboardingDto == nil {
+		return localVarReturnValue, nil, reportError("saveOnboardingDto is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.saveOnboardingDto
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type OrganizationsAPISaveQuickstartPromptRequest struct {
+	ctx context.Context
+	ApiService OrganizationsAPI
+	organizationId string
+	savePromptDraftDto *SavePromptDraftDto
+}
+
+func (r OrganizationsAPISaveQuickstartPromptRequest) SavePromptDraftDto(savePromptDraftDto SavePromptDraftDto) OrganizationsAPISaveQuickstartPromptRequest {
+	r.savePromptDraftDto = &savePromptDraftDto
+	return r
+}
+
+func (r OrganizationsAPISaveQuickstartPromptRequest) Execute() (*PromptDraftDto, *http.Response, error) {
+	return r.ApiService.SaveQuickstartPromptExecute(r)
+}
+
+/*
+SaveQuickstartPrompt Save your prompt draft with revision checking
+
+ @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+ @param organizationId
+ @return OrganizationsAPISaveQuickstartPromptRequest
+*/
+func (a *OrganizationsAPIService) SaveQuickstartPrompt(ctx context.Context, organizationId string) OrganizationsAPISaveQuickstartPromptRequest {
+	return OrganizationsAPISaveQuickstartPromptRequest{
+		ApiService: a,
+		ctx: ctx,
+		organizationId: organizationId,
+	}
+}
+
+// Execute executes the request
+//  @return PromptDraftDto
+func (a *OrganizationsAPIService) SaveQuickstartPromptExecute(r OrganizationsAPISaveQuickstartPromptRequest) (*PromptDraftDto, *http.Response, error) {
+	var (
+		localVarHTTPMethod   = http.MethodPut
+		localVarPostBody     interface{}
+		formFiles            []formFile
+		localVarReturnValue  *PromptDraftDto
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "OrganizationsAPIService.SaveQuickstartPrompt")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/organizations/{organizationId}/quickstart/prompt"
+	localVarPath = strings.Replace(localVarPath, "{"+"organizationId"+"}", url.PathEscape(parameterValueToString(r.organizationId, "organizationId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.savePromptDraftDto == nil {
+		return localVarReturnValue, nil, reportError("savePromptDraftDto is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.savePromptDraftDto
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
 		return localVarReturnValue, nil, err

@@ -1,6 +1,8 @@
 export interface OnboardingAutoOpenSignals {
   /** `?onboarding=1` is present — an explicit request to open the guide. */
   requestedByUrl: boolean
+  /** Only owners can finish organization setup in Welcome. */
+  canCompleteWelcome: boolean
   /** This browser has recorded a dismissal for this user. Per-browser, so never load-bearing alone. */
   dismissedInThisBrowser: boolean
   /** Account-state signals below have resolved. False while loading, and on query error. */
@@ -24,6 +26,7 @@ export function shouldAutoOpenOnboarding(signals: OnboardingAutoOpenSignals): bo
   // An explicit request always wins — the sidebar "Onboarding" entry routes through
   // ?onboarding=1, and it has to keep working for people who finished long ago.
   if (signals.requestedByUrl) return true
+  if (!signals.canCompleteWelcome) return false
 
   // Only ever suppresses within the browser that recorded it. Cross-browser suppression is
   // the account signals' job below — that split is the whole point of this function.

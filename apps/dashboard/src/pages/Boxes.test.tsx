@@ -8,12 +8,14 @@ import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import Boxes from './Boxes'
+import { OrganizationUserRoleEnum } from '@boxlite-ai/api-client'
 
 const navigate = vi.hoisted(() => vi.fn())
 // Each test decides what the account holds.
 const state = vi.hoisted(() => ({
   items: [] as Array<Record<string, unknown>> | undefined,
   total: 0,
+  role: 'owner',
   // The first render, before the list query has answered.
   pending: false,
   // The two account-state queries do not resolve together.
@@ -62,6 +64,7 @@ vi.mock('@/components/ui/dropdown-menu', () => {
 vi.mock('@/hooks/useSelectedOrganization', () => ({
   useSelectedOrganization: () => ({
     selectedOrganization: { id: 'org-1' },
+    authenticatedUserOrganizationMember: { role: state.role },
     authenticatedUserHasPermission: () => true,
   }),
 }))
@@ -141,6 +144,7 @@ describe('Boxes page, empty account', () => {
   beforeEach(() => {
     state.items = []
     state.total = 0
+    state.role = OrganizationUserRoleEnum.OWNER
     state.pending = false
     state.boxCountPending = false
     // Most cases are about the empty state itself, so start from a browser that
@@ -174,17 +178,19 @@ describe('Boxes page, empty account', () => {
     expect(document.querySelector('h1')?.textContent).toBe('Boxes')
     // The create affordance still belongs to the page, not to the empty state.
     expect(document.querySelector('[data-testid="create-box-dialog"]')).not.toBeNull()
-    expect(onboardingIsOpen()).toBe('false')
+    expect(onboardingIsOpen()).toBeUndefined()
+    expect(navigate).not.toHaveBeenCalled()
   })
 
-  it('opens the guide from the empty state, rather than inlining a second copy', () => {
+  it('navigates from the unchanged empty state to the dedicated Quickstart', () => {
     render()
 
     const openQuickstart = required(buttonWith('Open Quickstart'), 'Open Quickstart button')
 
     act(() => openQuickstart.click())
 
-    expect(onboardingIsOpen()).toBe('true')
+    expect(onboardingIsOpen()).toBeUndefined()
+    expect(navigate.mock.calls.at(-1)?.[0]).toBe('/dashboard/quickstart')
   })
 
   it('navigates to a box when its row is clicked, and arms delete from the row menu', () => {
@@ -221,7 +227,8 @@ describe('Boxes page, empty account', () => {
     // Nothing is known yet, so every count falls back rather than reading as a
     // real zero from the server, and the page still stands up.
     expect(document.querySelector('h1')?.textContent).toBe('Boxes')
-    expect(onboardingIsOpen()).toBe('false')
+    expect(onboardingIsOpen()).toBeUndefined()
+    expect(navigate).not.toHaveBeenCalled()
   })
 
   it('waits for both account-state queries before deciding to auto-open the guide', () => {
@@ -230,15 +237,25 @@ describe('Boxes page, empty account', () => {
     state.boxCountPending = true
     render()
 
-    expect(onboardingIsOpen()).toBe('false')
+    expect(onboardingIsOpen()).toBeUndefined()
+    expect(navigate).not.toHaveBeenCalled()
   })
 
-  it('opens the guide by itself for an account with no keys and no boxes', () => {
+  it('keeps non-owner members on Boxes even in a new empty organization', () => {
+    localStorage.clear()
+    state.role = 'member'
+    render()
+    expect(navigate).not.toHaveBeenCalled()
+    expect(document.querySelector('h1')?.textContent).toBe('Boxes')
+  })
+
+  it('opens welcome first for a new account with no keys and no boxes', () => {
     // Nothing dismissed anywhere, and both account signals say the account is
     // empty: this is someone's first visit, so the guide leads.
     localStorage.clear()
     render()
 
-    expect(onboardingIsOpen()).toBe('true')
+    expect(onboardingIsOpen()).toBeUndefined()
+    expect(navigate.mock.calls.at(-1)?.[0]).toBe('/dashboard/welcome')
   })
 })
