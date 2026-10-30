@@ -207,7 +207,8 @@ marker and the fixed verdict suffix: `not found in $PATH` maps to `127`, and
 substrings in the command name or path; those may contain either verdict.
 The guest executor (`BOXLITE_EXECUTOR=guest`) classifies `Command::spawn`
 directly: `NotFound` is `127` and `PermissionDenied` is `126`, with the same
-wording. Other startup failures remain errors.
+wording. A configured working directory is judged first, so its failures
+remain errors. Other startup failures remain errors.
 
 **Example:**
 ```text

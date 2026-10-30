@@ -118,15 +118,6 @@ impl GuestExecutor {
         &self,
         req: &ExecRequest,
     ) -> Result<ExecHandle, SpawnFailure> {
-        // `Command::spawn` also reports an unusable working directory as
-        // `ENOENT`. That is a configuration fault, not an outcome for the
-        // command, so checking it first keeps the two apart.
-        if !req.workdir.is_empty() && !std::path::Path::new(&req.workdir).is_dir() {
-            return Err(SpawnFailure::Failed(BoxliteError::Internal(format!(
-                "working directory '{}' is not a directory",
-                req.workdir
-            ))));
-        }
         if let Some(tty) = &req.tty {
             let config = PtyConfig::try_from(tty)?;
             spawn_with_pty(req, config)
@@ -139,7 +130,15 @@ impl GuestExecutor {
 /// Turn `execve`'s error into a POSIX result about the program (missing: 127,
 /// not executable: 126) or a guest fault. Codes and wording match the
 /// container executor, so every exec caller sees one message shape.
-fn classify_spawn_error(program: &str, error: std::io::Error) -> SpawnFailure {
+fn classify_spawn_error(program: &str, workdir: &str, error: std::io::Error) -> SpawnFailure {
+    // `Command::spawn` merges the `chdir` into the same error it reports for
+    // `execve`; a configured working directory that cannot be entered is the
+    // configuration's fault, not a verdict about the program.
+    if !workdir.is_empty() && !working_directory_is_searchable(workdir) {
+        return SpawnFailure::Failed(BoxliteError::Internal(format!(
+            "working directory '{workdir}' is not usable: {error}"
+        )));
+    }
     let rejection = match error.kind() {
         std::io::ErrorKind::NotFound => CommandRejection {
             message: format!("executable '{program}' not found in $PATH"),
@@ -156,6 +155,25 @@ fn classify_spawn_error(program: &str, error: std::io::Error) -> SpawnFailure {
         }
     };
     SpawnFailure::Rejected(rejection)
+}
+
+/// Whether `path` can be entered: `chdir` requires search permission on every
+/// component, which is what `X_OK` checks.
+fn working_directory_is_searchable(path: &str) -> bool {
+    use std::ffi::CString;
+
+    let Ok(path) = CString::new(path) else {
+        return false;
+    };
+    // SAFETY: `path` is a valid NUL-terminated string for the duration of the call.
+    unsafe {
+        nix::libc::faccessat(
+            nix::libc::AT_FDCWD,
+            path.as_ptr(),
+            nix::libc::X_OK,
+            nix::libc::AT_EACCESS,
+        ) == 0
+    }
 }
 
 /// Spawn process with pipes (standard mode).
@@ -193,7 +211,7 @@ fn spawn_with_pipes(req: &ExecRequest) -> Result<ExecHandle, SpawnFailure> {
 
     let mut child = cmd
         .spawn()
-        .map_err(|error| classify_spawn_error(&req.program, error))?;
+        .map_err(|error| classify_spawn_error(&req.program, &req.workdir, error))?;
 
     let pid = child.id();
 
@@ -280,7 +298,7 @@ fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> Result<ExecHandle, Sp
 
     let mut child = cmd
         .spawn()
-        .map_err(|error| classify_spawn_error(&req.program, error))?;
+        .map_err(|error| classify_spawn_error(&req.program, &req.workdir, error))?;
 
     let pid = child.id();
 
@@ -443,6 +461,40 @@ mod tests {
         assert!(
             matches!(result, Err(SpawnFailure::Failed(_))),
             "a missing workdir must stay a spawn failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_program_with_a_valid_workdir_still_returns_127() {
+        let mut req = request("/pol55/no-such-program");
+        req.workdir = "/".to_string();
+
+        let rejection = expect_rejection(GuestExecutor.spawn_attempt(&req).await);
+
+        assert_eq!(rejection.exit_code, 127);
+    }
+
+    #[tokio::test]
+    async fn an_unenterable_workdir_is_not_a_program_verdict() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { nix::libc::geteuid() } == 0 {
+            // Root can enter any directory, so the case cannot be produced.
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("locked");
+        std::fs::create_dir(&workdir).unwrap();
+        std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut req = request("/pol55/no-such-program");
+        req.workdir = workdir.to_str().unwrap().to_string();
+
+        let result = GuestExecutor.spawn_attempt(&req).await;
+
+        std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(result, Err(SpawnFailure::Failed(_))),
+            "a workdir failure must not become an exit status"
         );
     }
 
