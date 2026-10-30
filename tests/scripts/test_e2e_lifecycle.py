@@ -166,6 +166,14 @@ class LifecycleTest(unittest.TestCase):
             with self.assertRaisesRegex(manage.Failure, "ownership conflict"):
                 self.environment.status()
 
+    def test_non_venv_interpreter_is_rejected(self):
+        root = Path(self.scratch.name) / "not-a-venv"
+        (root / "bin").mkdir(parents=True)
+        (root / "bin/python").symlink_to(sys.executable)
+        with patch.dict(os.environ, {"E2E_PYTHON": str(root / "bin/python")}):
+            with self.assertRaisesRegex(manage.Failure, "virtual environment"):
+                manage.Environment()
+
 
 if __name__ == "__main__":
     unittest.main()

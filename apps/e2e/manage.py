@@ -79,8 +79,11 @@ class Environment:
             raise Failure("E2E ports must be distinct integers between 1024 and 65535")
         self.url = f"http://127.0.0.1:{self.ports['API']}/api"
         self.remote = bool(os.environ.get("BOXLITE_E2E_API_URL") and os.environ["BOXLITE_E2E_API_URL"].rstrip("/") != self.url)
-        self.python = str(Path(os.environ.get("E2E_PYTHON", ROOT / ".venv-e2e/bin/python")).resolve())
-        self.venv = Path(self.python).parents[1]
+        python = Path(os.environ.get("E2E_PYTHON", ROOT / ".venv-e2e/bin/python")).absolute()
+        self.python = str(python)
+        self.venv = python.parent.parent
+        if self.venv.exists() and not (self.venv / "pyvenv.cfg").exists():
+            raise Failure(f"E2E_PYTHON must point into a virtual environment: {self.python}")
         self.runtime_home = Path(f"/tmp/ble2e-{os.getuid()}-{self.identity}/r")
         self.run_dir = None
         self.processes = load(self.state / "processes.json")
