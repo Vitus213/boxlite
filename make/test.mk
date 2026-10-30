@@ -645,7 +645,8 @@ test\:install-script:
 # ─── E2E: SDK → API → Runner → VM ───────────────────────────────────────────
 export FILTER E2E_ARGS
 E2E_STATE_DIR ?= $(PROJECT_ROOT)/target/e2e
-E2E_PYTHON ?= $(PROJECT_ROOT)/.venv/bin/python
+E2E_PYTHON ?= $(PROJECT_ROOT)/.venv-e2e/bin/python
+E2E_CHECK_PYTHON ?= python3
 E2E_UV_VERSION = $(shell python3 -c 'import json; print(json.load(open("apps/e2e/dependencies.json"))["uv"])')
 
 test\:e2e\:setup:
@@ -664,14 +665,14 @@ test\:e2e\:status:
 	@python3 apps/e2e/manage.py status
 
 test\:e2e\:report:
-	@python3 apps/e2e/manage.py report
+	@python3 apps/e2e/manage.py report $(REPORT_ARGS)
 
 test\:e2e:
 	@python3 apps/e2e/manage.py run
 
 test\:e2e\:deps:
 	@if [ ! -x "$(E2E_PYTHON)" ]; then python3 -m venv "$$(dirname "$$(dirname "$(E2E_PYTHON)")")"; fi
-	@"$(E2E_PYTHON)" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "E2E requires Python 3.11+; keep the existing SDK environment and use a compatible interpreter")'
+	@"$(E2E_PYTHON)" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "E2E requires Python 3.11+; create E2E_PYTHON with a compatible interpreter")'
 	@"$(E2E_PYTHON)" -m pip install --quiet 'uv==$(E2E_UV_VERSION)'
 	@UV_PROJECT_ENVIRONMENT="$$(dirname "$$(dirname "$(E2E_PYTHON)")")" "$(E2E_PYTHON)" -m uv sync --project apps/e2e --locked --inexact --no-install-project --python "$(E2E_PYTHON)" --no-python-downloads
 
@@ -704,11 +705,8 @@ test\:e2e\:build\:node:
 	@cd sdks/node && npm run build:native -- -- --locked && npm run build
 
 test\:e2e\:check:
-	@.venv/bin/python -m unittest discover -s apps/e2e/lib -p 'test_*.py' -v
-	@.venv/bin/python -m pytest tests/scripts/test_e2e_reporting.py tests/scripts/test_e2e_lifecycle.py -v -p no:cacheprovider
-
-test\:e2e\:two-sided:
-	@PR_REF=$${PR_REF:?must set PR_REF=<branch>} bash apps/e2e/two_sided.sh
+	@$(E2E_CHECK_PYTHON) -m unittest discover -s apps/e2e/lib -p 'test_*.py' -v
+	@$(E2E_CHECK_PYTHON) -m pytest tests/scripts/test_e2e_reporting.py tests/scripts/test_e2e_lifecycle.py -v -p no:cacheprovider
 
 # ─── Stress: deployed REST API ─────────────────────────────────────────────
 test\:stress\:api-read:

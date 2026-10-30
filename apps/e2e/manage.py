@@ -79,7 +79,8 @@ class Environment:
             raise Failure("E2E ports must be distinct integers between 1024 and 65535")
         self.url = f"http://127.0.0.1:{self.ports['API']}/api"
         self.remote = bool(os.environ.get("BOXLITE_E2E_API_URL") and os.environ["BOXLITE_E2E_API_URL"].rstrip("/") != self.url)
-        self.python = str(ROOT / ".venv/bin/python")
+        self.python = str(Path(os.environ.get("E2E_PYTHON", ROOT / ".venv-e2e/bin/python")).resolve())
+        self.venv = Path(self.python).parents[1]
         self.runtime_home = Path(f"/tmp/ble2e-{os.getuid()}-{self.identity}/r")
         self.run_dir = None
         self.processes = load(self.state / "processes.json")
@@ -318,7 +319,7 @@ class Environment:
     def clients(self):
         self.env.update(BOXLITE_E2E_CLI=str(ROOT / "target/debug/boxlite"), BOXLITE_CLI=str(ROOT / "target/debug/boxlite"),
                         BOXLITE_E2E_NATIVE_LIB_DIR=str(ROOT / "target/debug"), BOXLITE_E2E_TSX=str(ROOT / "apps/node_modules/.bin/tsx"),
-                        PATH=f"{ROOT / '.venv/bin'}:{ROOT / 'target/debug'}:{self.env.get('PATH', '')}")
+                        PATH=f"{self.venv / 'bin'}:{ROOT / 'target/debug'}:{self.env.get('PATH', '')}")
         self.env["PYTHONPATH"] = str(E2E / "lib") + os.pathsep + self.env.get("PYTHONPATH", "")
         self.env["BOXLITE_E2E_RUN_DIR"] = str(self.run_dir)
 
@@ -370,7 +371,7 @@ class Environment:
     def prepare_dependencies(self):
         previous = load(self.state / "dependencies.json")
         updated = dict(previous)
-        python_env = dict(self.env, UV_PROJECT_ENVIRONMENT=str(ROOT / ".venv"))
+        python_env = dict(self.env, UV_PROJECT_ENVIRONMENT=str(self.venv))
         python_inputs = ["apps/e2e/pyproject.toml", "apps/e2e/uv.lock", "apps/e2e/dependencies.json"]
         python_id = self.fingerprint(python_inputs)
         if Path(self.python).exists():
@@ -659,7 +660,7 @@ class Environment:
         self.wait(name, ready, timeout)
         return True
 
-    def up(self):
+    def up(self, smoke=True):
         with self.stage("doctor"):
             self.doctor(strict=False)
         self.configure()
@@ -698,13 +699,19 @@ class Environment:
             self.fingerprint(["apps/e2e/fixture_setup.py", "apps/e2e/cases/test_path_verification.py", "apps/e2e/lib/path_verification.py"]),
         ], sort_keys=True).encode()).hexdigest()
         ready_file = self.state / "ready.json"
-        verified = load(ready_file).get("identity") == readiness
-        with self.stage("fixtures", not started and not changed and verified):
-            if started or changed or not verified or not (self.state / "client-home/credentials.toml").exists():
+        previous = load(ready_file)
+        verified = previous.get("identity") == readiness
+        verified_smoke = verified and bool(previous.get("smoke"))
+        fixtures_needed = (started or changed or not verified
+                           or not (self.state / "client-home/credentials.toml").exists())
+        with self.stage("fixtures", not fixtures_needed):
+            if fixtures_needed:
                 ready_file.unlink(missing_ok=True)
                 self.command([self.python, E2E / "fixture_setup.py"], env=self.env, timeout=60)
-                self.pytest(["cases/test_path_verification.py"], smoke=True)
-                save(ready_file, dict(identity=readiness, verified_at=utc()))
+                save(ready_file, dict(identity=readiness, smoke=False, verified_at=utc()))
+        if smoke and (fixtures_needed or not verified_smoke):
+            self.pytest(["cases/test_path_verification.py"], smoke=True)
+            save(ready_file, dict(identity=readiness, smoke=True, verified_at=utc()))
         print(f"[e2e] ready: {self.url}\n[e2e] logs: {self.state / 'logs'}\n[e2e] run: make test:e2e FILTER=exec_working_dir", flush=True)
 
     def pytest(self, extra, smoke=False):
@@ -791,7 +798,7 @@ def main(argv=None):
         print(f"[e2e] {error}", file=sys.stderr)
         return 2
     if args.command == "report":
-        return subprocess.call([sys.executable, str(ROOT / "scripts/test/rest/report.py"), "--state-dir", str(env.state)])
+        return subprocess.call([sys.executable, str(ROOT / "scripts/test/rest/report.py"), "--state-dir", str(env.state), *extra])
     env.initialize(args.command)
     def stop_requested(signum, frame):
         raise KeyboardInterrupt
@@ -807,7 +814,7 @@ def main(argv=None):
                 elif args.command == "down":
                     env.down()
                 else:
-                    env.up()
+                    env.up(smoke=args.command != "up")
                     env.startup_complete = True
                     if args.command == "run":
                         env.pytest([*shlex.split(os.environ.get("E2E_ARGS", "")), *extra])

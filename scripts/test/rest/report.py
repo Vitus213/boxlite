@@ -8,6 +8,7 @@ from collections import Counter
 import json
 import os
 from pathlib import Path
+import sys
 import xml.etree.ElementTree as ET
 
 
@@ -260,25 +261,30 @@ def summarize_run(directory: Path) -> tuple[list[str], bool]:
     return lines, bool(problems)
 
 
-def run_summary(state_dir: Path) -> list[str]:
+def run_summary(state_dir: Path) -> tuple[list[str], int]:
     directories = sorted(path for path in (state_dir / "runs").glob("*") if path.is_dir())
     if not directories:
-        return ["- No recorded E2E runs; no execution coverage claimed."]
+        return ["- No recorded E2E runs; no execution coverage claimed."], 0
     lines = []
+    incomplete_runs = 0
     for directory in directories:
         _, incomplete = summarize_run(directory)
+        incomplete_runs += int(incomplete)
         print(directory / "summary.md")
         lines.append(f"- `{directory.name}`: {'incomplete' if incomplete else 'complete'} evidence — `{rel(directory / 'summary.md')}`")
-    return lines
+    return lines, incomplete_runs
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=Path(os.environ.get("BOXLITE_E2E_STATE_DIR", REPO / "target" / "e2e")))
+    parser.add_argument("--allow-incomplete", action="store_true",
+                        help="report incomplete evidence without failing")
     args = parser.parse_args()
     state_dir = args.state_dir if args.state_dir.is_absolute() else REPO / args.state_dir
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    runs, incomplete = run_summary(state_dir)
     lines = [
         "# REST API Test Report",
         "",
@@ -294,7 +300,7 @@ def main() -> None:
         "",
         "## Recorded E2E Runs",
         "",
-        *run_summary(state_dir),
+        *runs,
         "",
         "## Artifacts",
         "",
@@ -303,6 +309,10 @@ def main() -> None:
     ]
     OUT.write_text("\n".join(lines))
     print(OUT)
+    if incomplete and not args.allow_incomplete:
+        print(f"{incomplete} recorded run(s) have incomplete evidence; "
+              "inspect them or pass --allow-incomplete", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

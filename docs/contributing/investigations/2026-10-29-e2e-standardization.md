@@ -484,3 +484,32 @@ regenerated after this run.
 
 Private-image cases remain unavailable without real private-image coordinates and read-only credentials. No credentials or OIDC profile tokens are included here. A fresh operating system, Ubuntu end-to-end acceptance, other host platforms and concurrent case isolation have not been demonstrated. The [runbook prerequisites](../../../apps/e2e/README.md#prereqs) distinguish the measured environment from those unverified paths.
 
+
+## 2026-10-30 audit follow-up
+
+The branch was rebased onto `main` after the local-registry test-image change.
+The Node cases keep `npx` as the unmanaged fallback because `e2e-cloud.yml`
+installs only the SDK; the managed run still passes its own `tsx` through
+`BOXLITE_E2E_TSX`, and a missing managed target fails instead of skipping.
+
+Four implementation defects found in review are fixed:
+
+- `build-runtime.sh` now checks the exit status of `cargo build` and
+  `cargo metadata`; a failed `--locked` build can no longer fall back to a
+  stale `out/runtime`.
+- Build reuse hashes more than sources: makefiles, build flags, the
+  build-relevant environment and tool versions are part of the identity.
+- Dependency containers carry a credential fingerprint. A changed password or
+  Dex configuration recreates the container, and the PostgreSQL volume is
+  removed because initdb reads `POSTGRES_PASSWORD` only once.
+- The E2E Python environment is isolated in `.venv-e2e`; `test:e2e:check`
+  runs with the devshell Python, and `test:e2e:report` exits nonzero on
+  incomplete evidence.
+
+The Runner `systemd-run --user` change moved to its own branch. The unsafe
+`two_sided.sh` helper and its make target were removed in favor of the
+separate-worktree method above.
+
+Still unverified or unchanged: the CI workflows do not run this manager, the
+local stack has only been accepted on x86_64 NixOS, the recorded full-suite
+failures remain, and rootless volume writes still fail after the mount starts.

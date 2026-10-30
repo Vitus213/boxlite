@@ -31,7 +31,7 @@
         packages = with pkgs; [
           rustup gcc gnumake git curl wget file pkg-config patchelf
           openssl gperf
-          python3 python3Packages.pip python3Packages.pyelftools
+          (python3.withPackages (ps: [ ps.pip ps.pyelftools ps.pytest ]))
           go
           nodejs_22 corepack postgresql_17 redis mountpoint-s3
           llvm libclang

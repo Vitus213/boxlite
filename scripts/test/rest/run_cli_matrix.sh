@@ -164,6 +164,7 @@ assert_contains() {
   local file="$1"
   local pattern="$2"
   if ! grep -q "$pattern" "$file"; then
+    CURRENT_COMMAND="assert_contains: $pattern"
     echo "Expected output to contain: $pattern" >&2
     echo "Output file: $file" >&2
     exit 1

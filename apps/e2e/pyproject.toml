@@ -13,5 +13,6 @@ dependencies = [
 ]
 
 [tool.uv]
+# The uv version is pinned once in dependencies.json, which the Make targets
+# install before syncing; required-version here would be a second source.
 package = false
-required-version = "==0.13.4"

@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -106,7 +107,8 @@ async def test_exec_roundtrip_proves_api_to_runner_chain(rt, image):
             f"executed the command. stdout={out!r}"
         )
 
-        if os.environ.get("BOXLITE_E2E_API_LOG") or API_LOG.exists():
+        local_api = urllib.parse.urlparse(ctx.url).hostname in ("127.0.0.1", "localhost")
+        if os.environ.get("BOXLITE_E2E_API_LOG") or (local_api and API_LOG.exists()):
             status, _ = request_json("GET", ctx.v1(f"boxes/{bid}"))
             assert status == 200, f"GET box {bid} failed: {status}"
             # The development Pino transport writes from a worker thread.

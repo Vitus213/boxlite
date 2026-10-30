@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -183,3 +184,31 @@ def test_unreported_collected_item_is_incomplete(report, tmp_path):
     lines, incomplete = report.summarize_run(tmp_path)
     assert incomplete
     assert any("incomplete=1" in line for line in lines)
+
+
+def test_report_fails_on_incomplete_evidence(report, tmp_path, monkeypatch, capsys):
+    run = tmp_path / "runs" / "20260101T000000Z-1"
+    run.mkdir(parents=True)
+    write_run(run, events())
+    (run / "run.json").write_text(json.dumps({"complete": False, "ended_at": None}))
+    report_dir = tmp_path / "report"
+    monkeypatch.setattr(report, "REPORT_DIR", report_dir)
+    monkeypatch.setattr(report, "OUT", report_dir / "rest-report.md")
+    monkeypatch.setattr(sys, "argv", ["report.py", "--state-dir", str(tmp_path)])
+    with pytest.raises(SystemExit) as failure:
+        report.main()
+    assert failure.value.code == 1
+    assert "incomplete evidence" in capsys.readouterr().err
+
+
+def test_report_allows_incomplete_evidence_on_request(report, tmp_path, monkeypatch):
+    run = tmp_path / "runs" / "20260101T000000Z-1"
+    run.mkdir(parents=True)
+    write_run(run, events())
+    (run / "run.json").write_text(json.dumps({"complete": False, "ended_at": None}))
+    report_dir = tmp_path / "report"
+    monkeypatch.setattr(report, "REPORT_DIR", report_dir)
+    monkeypatch.setattr(report, "OUT", report_dir / "rest-report.md")
+    monkeypatch.setattr(sys, "argv", ["report.py", "--state-dir", str(tmp_path), "--allow-incomplete"])
+    report.main()
+    assert (report_dir / "rest-report.md").exists()

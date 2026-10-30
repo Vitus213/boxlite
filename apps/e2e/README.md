@@ -108,13 +108,13 @@ preparation time, recorded separately from cached single-case execution.
 | --- | --- |
 | `make test:e2e:doctor` | Check tools, KVM/FUSE access, ports and volume prerequisites |
 | `make test:e2e:setup` | Prepare source clients, services, fixtures and guest smoke |
-| `make test:e2e:up` | Start or recover the environment, reusing current artifacts |
+| `make test:e2e:up` | Start or recover the environment without repeating the guest smoke |
 | `make test:e2e [FILTER=expression]` | Run all cases or pytest's `-k` selection |
 | `make test:e2e E2E_ARGS='cases/test_exec_user.py::test_exec_user_runs_as_requested_ids'` | Run one exact nodeid |
 | `make test:e2e:status` | Inspect the owned environment |
 | `make test:e2e:down` | Stop owned services; preserve data, keys and caches |
 | `make test:e2e:report` | Aggregate recorded results and timings |
-| `make test:e2e:check` | Exercise the offline harness boundaries |
+| `make test:e2e:check` | Run the harness checks with the devshell Python; no E2E venv or network |
 
 Run from the repository root, inside `nix develop` or another complete development
 environment. `apps/e2e/run.sh` enters the same manager and accepts pytest arguments.
@@ -126,7 +126,8 @@ ownership, logs and `runs/<id>/` evidence. `BOXLITE_E2E_STATE_DIR` chooses anoth
 state directory. The Runner has a short separate home under `/tmp/ble2e-*` to
 avoid Unix socket path limits. Nothing rewrites the user's normal CLI profile or
 installs system services. The old `bootstrap.sh`/`teardown.sh` remain explicit
-Ubuntu system-service maintenance scripts; standard commands do not call them.
+Ubuntu system-service maintenance scripts; they are not an alternative entry
+point for the managed commands and are not covered by their checks.
 
 Default ports are API 3300, Runner 38080, Preview Proxy 34000, Registry Proxy
 34100, PostgreSQL 35432, Redis 36379, Registry 35000, Dex 35556 and MinIO 39000.
@@ -162,18 +163,19 @@ native compiler installations or the public SDK compatibility ranges.
 
 | Layer | Managed E2E contract |
 | --- | --- |
-| Python tools | `apps/e2e/pyproject.toml` and universal `uv.lock`; pinned uv, `sync --locked --inexact` into the repository `.venv`; Python 3.11+ stays host-provided |
+| Python tools | `apps/e2e/pyproject.toml` and universal `uv.lock`; pinned uv, `sync --locked --inexact` into the dedicated `.venv-e2e`; Python 3.11+ stays host-provided |
 | Apps | Checked-in `apps/yarn.lock`; Corepack selects the declared Yarn version and installs with `--immutable` |
 | Node SDK | Checked-in `sdks/node/package-lock.json`; `npm ci` refuses manifest drift |
 | Service and guest images | `dependencies.json` pins multiarchitecture indexes for PostgreSQL, Redis, Registry, Dex and the curated guest; each supports Linux amd64 and arm64 |
 | MinIO | Same historical release, official per-architecture binary SHA-256 plus license checksum, built into the local scratch image by `Minio.Dockerfile`; no dependency on the retired image registry |
 | Rust / Go | Managed builds use the existing Cargo lock with `--locked` and Go read-only module resolution. Native compiler versions remain recorded host inputs; nested vendor builds and sum files are not a hermetic toolchain |
 
-The manager fingerprints manifests, locks and interpreter/runtime identity.
-Dependency changes refresh installs and affected clients/API readiness;
-unchanged runs reuse them. Python synchronization preserves the editable SDK
-and unrelated developer tools. A pre-existing Python 3.10 environment is rejected
-without replacing it. Normal `make dev:*` dependency policies remain available.
+The manager fingerprints manifests, locks, interpreter identity, build recipes,
+build flags and tool versions. Dependency changes refresh installs and affected
+clients/API readiness; unchanged runs reuse them. Python synchronization uses
+`.venv-e2e`, so the SDK `.venv` and unrelated developer tools are untouched.
+A Python older than 3.11 is rejected. Normal `make dev:*` dependency policies
+remain available.
 
 Use `make test:e2e:deps` to install the locked Python environment, or
 `make test:e2e:deps E2E_PYTHON=/absolute/venv/bin/python` to validate a separate
@@ -186,9 +188,10 @@ its locked version and digest together.
 `make test:e2e:build:minio` builds only the checksum-verified historical MinIO
 release for this host. Downloads are cached by their locked SHA-256 and
 re-verified on reuse, so a Dockerfile change rebuilds the image without fetching
-the binary again. Existing owned containers reconcile to the selected image
-while retaining named data volumes. This does not establish guest volume-write
-correctness or a maintained production storage recommendation.
+the binary again. Existing owned containers reconcile their image, port,
+credentials and Dex configuration; a changed PostgreSQL password recreates its
+named volume because initdb reads it only once. This does not establish guest
+volume-write correctness or a maintained production storage recommendation.
 
 ## Running against a remote API (dev / staging)
 
@@ -467,7 +470,9 @@ Every operation records its original exit and phase times under
 `target/e2e/runs/<id>/`. Test runs also write `pytest.log`, `junit.xml` and
 `cases.jsonl` with collection and setup/call/teardown results. Reports separate
 test failures, errors, skips, xfails, unexpected passes and incomplete evidence;
-offline harness guards are separate from VM coverage. A failed initial attempt
+`make test:e2e:report` exits nonzero when any recorded run is incomplete, and
+`make test:e2e:report REPORT_ARGS=--allow-incomplete` reports without failing.
+Offline harness guards are separate from VM coverage. A failed initial attempt
 stays recorded after a passing diagnostic rerun.
 
 Ctrl-C records manager exit 130 and incomplete evidence; the next command can
@@ -482,10 +487,8 @@ contains raw run IDs, startup/rerun measurements, original failures and source
 comparisons. The standard workflow uses existing pytest fixtures and serial case
 discovery; changing a case does not invalidate service or SDK builds.
 
-The historical `two_sided.sh` changes the current checkout and has an unsafe exit
-trap; it is not part of this standard workflow. For regression proof, use
-separate worktrees with the same candidate test and compare the original
-assertion failure against the fix, preserving both results.
+For regression proof, use separate worktrees with the same candidate test and
+compare the original assertion failure against the fix, preserving both results.
 
 ## Layout
 
@@ -497,7 +500,6 @@ apps/e2e/
 ├── fixture_setup.py         # Authenticated organization quotas + isolated profiles
 ├── run.sh                   # Thin direct entry to manage.py run
 ├── sweep.py                 # Reclaim boxes earlier runs stranded (cloud)
-├── two_sided.sh             # Legacy checkout-mutating regression script
 ├── pytest.ini
 ├── lib/
 │   ├── catalog_boxes.py     # Boxes against the catalog: pull budget, report window
