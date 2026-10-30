@@ -323,6 +323,7 @@ jobs:
               - 'apps/e2e/**/!(*.md)'
               - 'apps/box-images/VERSION'
               - 'tests/scripts/test_e2e_*.py'
+              - 'tests/scripts/e2e_reporting_test.py'
               - 'scripts/test/rest/**/!(*.md)'
               - 'Makefile'
               - 'make/vars.mk'

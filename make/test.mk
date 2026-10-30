@@ -707,7 +707,7 @@ test\:e2e\:build\:node:
 
 test\:e2e\:check:
 	@$(E2E_CHECK_PYTHON) -m unittest discover -s apps/e2e/lib -p 'test_*.py' -v
-	@$(E2E_CHECK_PYTHON) -m pytest tests/scripts/test_e2e_reporting.py tests/scripts/test_e2e_lifecycle.py -v -p no:cacheprovider
+	@$(E2E_CHECK_PYTHON) -m pytest tests/scripts/e2e_reporting_test.py tests/scripts/test_e2e_lifecycle.py -v -p no:cacheprovider
 
 # ─── Stress: deployed REST API ─────────────────────────────────────────────
 test\:stress\:api-read:
