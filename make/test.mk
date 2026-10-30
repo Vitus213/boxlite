@@ -646,7 +646,7 @@ test\:install-script:
 export FILTER E2E_ARGS
 E2E_STATE_DIR ?= $(PROJECT_ROOT)/target/e2e
 E2E_PYTHON ?= $(PROJECT_ROOT)/.venv-e2e/bin/python
-E2E_CHECK_PYTHON ?= python3
+E2E_CHECK_PYTHON ?= $(if $(wildcard $(E2E_PYTHON)),$(E2E_PYTHON),python3)
 E2E_UV_VERSION = $(shell python3 -c 'import json; print(json.load(open("apps/e2e/dependencies.json"))["uv"])')
 
 test\:e2e\:setup:

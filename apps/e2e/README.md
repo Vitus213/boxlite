@@ -114,7 +114,7 @@ preparation time, recorded separately from cached single-case execution.
 | `make test:e2e:status` | Inspect the owned environment |
 | `make test:e2e:down` | Stop owned services; preserve data, keys and caches |
 | `make test:e2e:report` | Aggregate recorded results and timings |
-| `make test:e2e:check` | Run the harness checks with the devshell Python; no E2E venv or network |
+| `make test:e2e:check` | Run the harness checks without services, using `.venv-e2e` when synced and the devshell Python otherwise |
 
 Run from the repository root, inside `nix develop` or another complete development
 environment. `apps/e2e/run.sh` enters the same manager and accepts pytest arguments.
