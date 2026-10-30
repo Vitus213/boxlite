@@ -476,11 +476,7 @@ func (c *Client) wrapMountCmd(ctx context.Context, spec mountSpec) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, spec.bin, spec.args...)
 
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
-		sdArgs := []string{"--scope"}
-		if os.Geteuid() != 0 {
-			sdArgs = append(sdArgs, "--user")
-		}
-		sdArgs = append(sdArgs, "--", spec.bin)
+		sdArgs := []string{"--scope", "--", spec.bin}
 		sdArgs = append(sdArgs, spec.args...)
 		cmd = exec.CommandContext(ctx, "systemd-run", sdArgs...)
 	}
