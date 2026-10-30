@@ -232,7 +232,7 @@ collect_libraries() {
     # Build boxlite crate and capture the exact OUT_DIR from cargo's JSON output
     # This is deterministic - no guessing based on directory names or timestamps
     local runtime_src=""
-    runtime_src=$(cargo build $build_flag --lib -p boxlite --message-format=json 2>/dev/null | \
+    runtime_src=$(cargo build ${BOXLITE_CARGO_LOCKED:+--locked} $build_flag --lib -p boxlite --message-format=json 2>/dev/null | \
         grep -o '"out_dir":"[^"]*"' | \
         tail -1 | \
         cut -d'"' -f4)
@@ -244,7 +244,7 @@ collect_libraries() {
     # Fallback: if JSON parsing failed, find by modification time (newest first)
     if [ -z "$runtime_src" ] || [ ! -d "$runtime_src" ]; then
         local out_dir
-        out_dir=$(cargo metadata --format-version 1 2>/dev/null | \
+        out_dir=$(cargo metadata ${BOXLITE_CARGO_LOCKED:+--locked} --format-version 1 2>/dev/null | \
             grep -o '"target_directory":"[^"]*"' | \
             cut -d'"' -f4)
 

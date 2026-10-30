@@ -645,6 +645,8 @@ test\:install-script:
 # ─── E2E: SDK → API → Runner → VM ───────────────────────────────────────────
 export FILTER E2E_ARGS
 E2E_STATE_DIR ?= $(PROJECT_ROOT)/target/e2e
+E2E_PYTHON ?= $(PROJECT_ROOT)/.venv/bin/python
+E2E_UV_VERSION = $(shell python3 -c 'import json; print(json.load(open("apps/e2e/dependencies.json"))["uv"])')
 
 test\:e2e\:setup:
 	@python3 apps/e2e/manage.py setup
@@ -667,8 +669,26 @@ test\:e2e\:report:
 test\:e2e:
 	@python3 apps/e2e/manage.py run
 
-test\:e2e\:deps: _ensure-python-deps
-	@.venv/bin/python -m pip install 'pytest-timeout>=2.4,<3'
+test\:e2e\:deps:
+	@if [ ! -x "$(E2E_PYTHON)" ]; then python3 -m venv "$$(dirname "$$(dirname "$(E2E_PYTHON)")")"; fi
+	@"$(E2E_PYTHON)" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "E2E requires Python 3.11+; keep the existing SDK environment and use a compatible interpreter")'
+	@"$(E2E_PYTHON)" -m pip install --quiet 'uv==$(E2E_UV_VERSION)'
+	@UV_PROJECT_ENVIRONMENT="$$(dirname "$$(dirname "$(E2E_PYTHON)")")" "$(E2E_PYTHON)" -m uv sync --project apps/e2e --locked --inexact --no-install-project --python "$(E2E_PYTHON)" --no-python-downloads
+
+test\:e2e\:lock:
+	@"$(E2E_PYTHON)" -m uv lock --project apps/e2e --python "$(E2E_PYTHON)" --no-python-downloads
+
+test\:e2e\:deps\:apps:
+	@cd apps && corepack yarn install --immutable
+
+test\:e2e\:deps\:node:
+	@cd sdks/node && node scripts/check-lockfile.mjs && npm ci --no-audit --no-fund
+
+test\:e2e\:build\:python:
+	@"$(E2E_PYTHON)" -m uv pip install --python "$(E2E_PYTHON)" --no-deps --no-build-isolation --config-settings 'build-args=--locked --profile dev' --editable sdks/python
+
+test\:e2e\:build\:minio:
+	@python3 apps/e2e/minio.py --state-dir "$(E2E_STATE_DIR)"
 
 # Invoked only when source inputs changed; setup owns the shared runtime build.
 test\:e2e\:build\:runner:
@@ -680,8 +700,8 @@ test\:e2e\:build\:proxies:
 	@cd apps/proxy && go build -o "$(E2E_STATE_DIR)/bin/proxy" ./cmd/proxy
 	@cd apps/image-service && go build -o "$(E2E_STATE_DIR)/bin/registry-proxy" ./cmd/registry-proxy
 
-test\:e2e\:build\:node: _ensure-node-deps
-	@cd sdks/node && npm run build:native && npm run build
+test\:e2e\:build\:node:
+	@cd sdks/node && npm run build:native -- -- --locked && npm run build
 
 test\:e2e\:check:
 	@.venv/bin/python -m unittest discover -s apps/e2e/lib -p 'test_*.py' -v

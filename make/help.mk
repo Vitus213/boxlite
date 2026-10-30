@@ -92,6 +92,8 @@ help:
 	@echo "    make test:e2e:status        - Inspect owned service health"
 	@echo "    make test:e2e:report        - Aggregate actual run outcomes and stage timings"
 	@echo "    make test:e2e:check         - Test offline E2E lifecycle and reporting boundaries"
+	@echo "    make test:e2e:deps          - Install the locked portable Python E2E tools"
+	@echo "    make test:e2e:lock          - Refresh the reviewed E2E Python lock after requirement changes"
 	@echo "    make test:stress:api-read   - Run read-only k6 stress test against a deployed REST API"
 	@echo "    make test:stress:api-read-local - Run low-rate local-network API stress canary"
 	@echo "    make test:stress:api-create-box - Run k6 stress test that creates and deletes boxes"

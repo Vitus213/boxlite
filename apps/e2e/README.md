@@ -76,8 +76,8 @@ and [measured acceptance](../../docs/contributing/investigations/2026-10-29-e2e-
 ## Prereqs
 
 Linux with readable/writable `/dev/kvm`, a Docker-compatible container CLI
-(tested with rootless Podman), Python 3.11+, Node, Corepack, Go, Rust and native
-build tools. The repository's Nix shell supplies the toolchain:
+(tested with rootless Podman), Python 3.11+, Node 22.12+, Corepack, Go, Rust and
+native build tools. The repository's Nix shell supplies the toolchain:
 
 ```bash
 nix develop -c make test:e2e:doctor
@@ -147,10 +147,48 @@ logs; it does not assert volume persistence. See the
 [measured results and remaining failures](../../docs/contributing/investigations/2026-10-29-e2e-standardization.md#execution-observations)
 before treating local startup as full-suite success.
 
-`BOXLITE_E2E_IMAGE` overrides the curated image derived from
-`apps/box-images/VERSION`. Catalog references also accept registry ports, tags
-and digests through `BOXLITE_E2E_CATALOG_IMAGE`. Containers retain their resolved
-image digest in the state directory rather than pulling mutable tags every run.
+`BOXLITE_E2E_IMAGE` overrides the locked curated image associated with
+`apps/box-images/VERSION`. The manager exports the selected ref as both
+`BOXLITE_E2E_IMAGE` and `BOXLITE_SYSTEM_BASE_IMAGE`, because API image admission
+matches curated refs by exact string: a digest-pinned ref is otherwise treated
+as an unregistered `ghcr.io` image and rejected with HTTP 400. Catalog references
+retain their explicit tag/digest contracts through `BOXLITE_E2E_CATALOG_IMAGE`.
+
+## Locked dependencies
+
+The [portable dependency design](https://github.com/boxlite-ai/boxlite/issues/2207)
+locks the managed E2E path without changing Ubuntu's apt packages, system Python,
+native compiler installations or the public SDK compatibility ranges.
+
+| Layer | Managed E2E contract |
+| --- | --- |
+| Python tools | `apps/e2e/pyproject.toml` and universal `uv.lock`; pinned uv, `sync --locked --inexact` into the repository `.venv`; Python 3.11+ stays host-provided |
+| Apps | Checked-in `apps/yarn.lock`; Corepack selects the declared Yarn version and installs with `--immutable` |
+| Node SDK | Checked-in `sdks/node/package-lock.json`; `npm ci` refuses manifest drift |
+| Service and guest images | `dependencies.json` pins multiarchitecture indexes for PostgreSQL, Redis, Registry, Dex and the curated guest; each supports Linux amd64 and arm64 |
+| MinIO | Same historical release, official per-architecture binary SHA-256 plus license checksum, built into the local scratch image by `Minio.Dockerfile`; no dependency on the retired image registry |
+| Rust / Go | Managed builds use the existing Cargo lock with `--locked` and Go read-only module resolution. Native compiler versions remain recorded host inputs; nested vendor builds and sum files are not a hermetic toolchain |
+
+The manager fingerprints manifests, locks and interpreter/runtime identity.
+Dependency changes refresh installs and affected clients/API readiness;
+unchanged runs reuse them. Python synchronization preserves the editable SDK
+and unrelated developer tools. A pre-existing Python 3.10 environment is rejected
+without replacing it. Normal `make dev:*` dependency policies remain available.
+
+Use `make test:e2e:deps` to install the locked Python environment, or
+`make test:e2e:deps E2E_PYTHON=/absolute/venv/bin/python` to validate a separate
+environment. After deliberately changing Python requirements, run
+`make test:e2e:lock` and review both manifest and lock. For Node changes, regenerate
+the existing lock with its package manager before running E2E. Image updates must
+verify both supported architectures; a changed guest VERSION requires updating
+its locked version and digest together.
+
+`make test:e2e:build:minio` builds only the checksum-verified historical MinIO
+release for this host. Downloads are cached by their locked SHA-256 and
+re-verified on reuse, so a Dockerfile change rebuilds the image without fetching
+the binary again. Existing owned containers reconcile to the selected image
+while retaining named data volumes. This does not establish guest volume-write
+correctness or a maintained production storage recommendation.
 
 ## Running against a remote API (dev / staging)
 

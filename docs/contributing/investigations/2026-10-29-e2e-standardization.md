@@ -22,8 +22,10 @@ code. SDK public interfaces are unchanged.
 
 ### Dependency reproducibility boundary
 
-Standardized commands and reusable artifacts do not by themselves freeze the
-environment across machines. The current installation contract is:
+The following table records the installation boundary measured before the
+[portable dependency lock follow-up](https://github.com/boxlite-ai/boxlite/issues/2207).
+The [current runbook](../../../apps/e2e/README.md#locked-dependencies) describes
+the managed E2E lock contract; compiler and host-library variability remain.
 
 | Dependency layer | Current constraint | Remaining variability |
 | --- | --- | --- |
@@ -35,9 +37,95 @@ environment across machines. The current installation contract is:
 | Dependency images | New state resolves configured tags, then stores the actual digest locally | Tags include `17-alpine`, `7-alpine` and `latest`; separate machines/states may resolve different digests |
 | Guest image | Curated version comes from `apps/box-images/VERSION`, with an explicit override available | A version tag is not a repository-pinned digest |
 
-No dependency-freezing change is implied by this comparison. Cross-machine
-reproducibility requires an explicit toolchain version, frozen package installs
-and repository-owned image digests in addition to the existing run evidence.
+These original measurements did not freeze cross-machine dependencies. The
+follow-up adds immutable package installs and repository-owned image identities;
+it does not pin distro packages or promise byte-identical native builds.
+
+### Lock implementation observations (2026-10-29)
+
+The managed E2E path now installs through checked-in locks. Exercised layers:
+
+| Layer | Exercised command and observed result |
+| --- | --- |
+| Python tools | `uv sync --project apps/e2e --locked --inexact --no-install-project` against the repository `.venv`; a warm check resolves 15 packages and reports no changes in about 1 ms. Pinned uv 0.13.4 installs 13 locked packages |
+| Apps | Corepack Yarn 4.13.0 `install --immutable` completed; peer-range warnings are reported by the existing manifests and change nothing |
+| Node SDK | `npm ci` plus `napi build --locked`; Cargo finished in 51.26 s and `tsc` in about 6 s |
+| Rust / Go | `BOXLITE_CARGO_LOCKED=1` and `GOFLAGS=-mod=readonly` during managed builds |
+| MinIO | Locked release binary (amd64 110,989,496 bytes, SHA-256 `7c5bd851…`) verified against the GitHub asset digest, built into a scratch image, and started with a real version query |
+
+Ubuntu 24.04 with its apt Python 3.12.3 bootstrapped pinned uv 0.13.4 and
+installed all 13 locked packages (`pytest 9.1.1`, `pytest-asyncio 1.4.0`), so the
+universal lock covers the 3.12 `typing-extensions` branch. That run exercised
+the dependency layer only; a full Ubuntu E2E acceptance still needs KVM and the
+complete service stack.
+
+Failures found and fixed while exercising this path:
+
+| Failure | Evidence | Correction |
+| --- | --- | --- |
+| Scratch MinIO image started but `--version` failed with `getent` missing | `minio: <ERROR> Unable to get mcConfigDir. exec: "getent": executable file not found` | Set `HOME=/data` in `Minio.Dockerfile`; the tool needs a writable home, not distro tooling |
+| A `Minio.Dockerfile` edit invalidated the 105 MB download cache because the Dockerfile fed image identity | Repeat run re-downloaded the binary and hit a 30 s read timeout | Content-addressed download cache keyed by the locked SHA-256, hardlink/copy into the build context; per-read timeout raised to 120 s |
+| One GitHub asset download completed but hashed differently (`bf4fcad7…` vs `7c5bd851…`) | The SHA guard rejected it and removed the partial file; a later download matched | Keep the strict SHA gate, add a declared Content-Length check and three bounded attempts |
+| `docker inspect <name>` matched a same-named data volume when the container was absent (Podman), producing `Container ownership conflict` on a clean slate | Volume JSON has no `Config`; cleanup keeps named volumes by design | `docker container inspect` scopes the query to containers |
+| `uv sync --check` cannot detect a removed editable SDK or `greenlet` in a warm `.venv` | Check reports locked packages only | Probe `import boxlite, greenlet` before trusting the cached dependency identity |
+
+An orphaned `apt-get` from a killed `docker exec` held the sandbox dpkg lock;
+this is a host investigation detail, not a product behavior.
+
+Final acceptance after the fixes above, on the measured NixOS host with warm
+caches:
+
+| Check | Command | Observed |
+| --- | --- | --- |
+| Managed smoke, first run after fixes | `nix develop -c make test:e2e E2E_ARGS=cases/test_path_verification.py` | 2 passed; MinIO image built from the locked binary, fixtures ran, exit 0, 33.99 s external |
+| Managed smoke, unchanged rerun | Same command | 2 passed; every dependency/build group and fixtures cached, exit 0, **5.63 s external** |
+| Offline harness suite | `nix develop -c make test:e2e:check` | 30 passed in 0.77 s (7 library checks, 23 reporting/lifecycle checks including the new dependency-cache boundary test) |
+| Ubuntu 24.04 dependency layer | Pinned uv 0.13.4 + locked sync on apt Python 3.12.3 | 13 locked packages installed; `pytest 9.1.1`, `pytest-asyncio 1.4.0`, `typing-extensions 4.16.0` |
+
+The smoke proves SDK → API → Runner → guest execution through the locked stack.
+It does not re-establish the full-suite verdict, which remains recorded above
+from the earlier harness revision.
+
+The curated-image admission rule matches refs by exact string, so the locked
+digest ref must also be exported as `BOXLITE_SYSTEM_BASE_IMAGE`; otherwise a
+create is refused with HTTP 400 for an unregistered `ghcr.io` credential. That
+export is part of the managed environment contract.
+
+### Full suite on the locked stack (2026-10-29)
+
+`nix develop -c make test:e2e` on the locked dependency stack collected 234
+cases and finished in **791.87 s** of pytest time (795.19 s manager) with
+**204 passed, 18 failed, 7 skipped, 5 xfailed**. The 204 is 188 real E2E passes
+plus 16 offline harness guards; the report keeps those scopes separate. Every
+dependency, build and fixture stage was a cache hit; preparation before pytest
+was **~2.5 s**.
+
+| Failure group | Cases | Cause evidence |
+| --- | --- | --- |
+| Docker Hub unreachable during the run | 7 (`test_images_aliases` ×5, `test_create_with_unknown_image_returns_typed_error`, `test_image_pull_failed_returns_422`) | Runner logged `failed to pull manifest: error sending request for url (https://index.docker.io/…)` and `failed to pull a registry token: … (https://auth.docker.io/…)`. The same seven cases passed on rerun once connectivity returned |
+| Known product behavior, unchanged from earlier runs | 10 (preview 404, foreground WS handshake, exec timeout ×2, exec-on-stopped-box, stop/start `State change in progress` ×2, rapid create-remove leak, tunnel-rejects-stopped-box, secret-bound host 502) | Same assertions and messages as the previously recorded verdicts |
+| Managed-volume write | 1 (`test_volume_contents_outlive_the_box_that_wrote_them`) | `Operation not permitted` writing `/mnt/e2e-volume`; the previously recorded rootless mount limitation |
+
+A follow-up run of the seven network-dependent cases passed all seven
+(`20261029T160255.460196Z-496434`, 7 passed in 59.53 s). One of them initially
+failed on a stranded box (`ix0avfE2EB2U`, state `stopped`, `alpine:3.19`) left
+by the interrupted pull: the catalog refuses to remove an image a box can still
+boot from, so five alias cases errored until that box was removed. The suite
+bounds every box's lifetime, but a case that dies before creating its cleanup
+entry can still strand one until `auto_delete` fires. This is test-hygiene
+cascade, not a product defect, and the sweep remains the recovery path.
+
+Host connectivity to Docker Hub was independently intermittent during this
+window: five consecutive token requests returned `200, 200, 000, 200, 000`, and
+a manifest fetch timed out after 25 s. Failures of this shape are environment
+evidence, not a verdict on the change.
+
+Case authoring on this stack was re-exercised with the README pattern: a
+one-file `cases/test_authoring_probe.py` was discovered automatically (235
+collected, 234 deselected) and its real guest assertion — stdout `e2e-out`,
+stderr `e2e-err`, exit 42 — passed in 0.55 s with a cached stack. The temporary
+file was then removed; no registry or CI change was needed.
+
 
 
 ## Original diagnosis and historical baseline

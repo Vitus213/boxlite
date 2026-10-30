@@ -27,13 +27,14 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 E2E = ROOT / "apps/e2e"
 sys.path.insert(0, str(E2E / "lib"))
-from images import default_image
+sys.path.insert(0, str(E2E))
+from minio import image_ref as minio_image_ref
+
+DEPENDENCIES = json.loads((E2E / "dependencies.json").read_text())
 
 PORTS = dict(API=3300, RUNNER=38080, PROXY=34000, REGISTRY_PROXY=34100,
              POSTGRES=35432, REDIS=36379, REGISTRY=35000, DEX=35556, MINIO=39000)
-IMAGES = dict(postgres="docker.io/library/postgres:17-alpine", redis="docker.io/library/redis:7-alpine",
-              registry="docker.io/library/registry:2", dex="ghcr.io/dexidp/dex:v2.41.1",
-              minio="docker.io/minio/minio:latest")
+IMAGES = {**DEPENDENCIES["images"], "minio": minio_image_ref()}
 
 
 def utc():
@@ -83,6 +84,8 @@ class Environment:
         self.run_dir = None
         self.processes = load(self.state / "processes.json")
         self.env = dict(os.environ)
+        self.env["BOXLITE_CARGO_LOCKED"] = "1"
+        self.env["GOFLAGS"] = self.env.get("GOFLAGS", "") + " -mod=readonly"
         self.stages = threading.Lock()
         self.new_processes = []
         self.new_containers = []
@@ -207,6 +210,9 @@ class Environment:
             missing.append("read/write /dev/kvm")
         if missing:
             raise Failure("Missing prerequisites: " + ", ".join(missing) + "; use nix develop -c make test:e2e:setup")
+        node_version = tuple(map(int, self.capture(["node", "--version"]).lstrip("v").split(".")[:2]))
+        if node_version < (22, 12):
+            raise Failure("E2E apps dependencies require Node 22.12+; SDK Node support is unchanged")
         if not self.remote:
             self.capture(["docker", "ps", "--format", "{{.Names}}"])
             self.check_ports()
@@ -294,7 +300,12 @@ class Environment:
         self.env["BOXLITE_REST_URL"] = self.url
         self.env.pop("BOXLITE_REST_PATH_PREFIX", None)
         self.env.pop("BOXLITE_DEPS_STUB", None)
-        self.env["BOXLITE_E2E_IMAGE"] = default_image()
+        guest = DEPENDENCIES["guest"]
+        if not os.environ.get("BOXLITE_E2E_IMAGE") and (ROOT / "apps/box-images/VERSION").read_text().strip().lstrip("v") != guest["version"]:
+            raise Failure("Curated guest VERSION changed; update apps/e2e/dependencies.json before E2E setup")
+        guest_ref = os.environ.get("BOXLITE_E2E_IMAGE") or guest["image"]
+        self.env["BOXLITE_E2E_IMAGE"] = guest_ref
+        self.env["BOXLITE_SYSTEM_BASE_IMAGE"] = guest_ref
         for directory in (self.runtime_home, self.state / "registry-secrets", self.state / "logs", self.state / "client-home"):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         save(self.state / "env.json", config)
@@ -335,12 +346,49 @@ class Environment:
         save(self.run_dir / "run.json", self.record)
 
 
+    def prepare_dependencies(self):
+        previous = load(self.state / "dependencies.json")
+        updated = dict(previous)
+        python_env = dict(self.env, UV_PROJECT_ENVIRONMENT=str(ROOT / ".venv"))
+        python_inputs = ["apps/e2e/pyproject.toml", "apps/e2e/uv.lock", "apps/e2e/dependencies.json"]
+        python_id = self.fingerprint(python_inputs)
+        if Path(self.python).exists():
+            python_id += self.capture([self.python, "-c", "import sys,sysconfig; print(sys.version, sysconfig.get_config_var('SOABI'))"])
+            check = self.capture([self.python, "-m", "uv", "sync", "--project", str(E2E), "--locked", "--inexact",
+                                  "--no-install-project", "--check", "--python", self.python, "--no-python-downloads"],
+                                 env=python_env, check=False)
+            probe = self.capture([self.python, "-c", "import boxlite, greenlet"], check=False)
+            python_ready = check.returncode == 0 and probe.returncode == 0
+        else:
+            python_ready = False
+        with self.stage("deps-python", python_ready and previous.get("python") == python_id):
+            if not python_ready or previous.get("python") != python_id:
+                self.make("test:e2e:deps")
+                python_id = self.fingerprint(python_inputs) + self.capture([self.python, "-c", "import sys,sysconfig; print(sys.version, sysconfig.get_config_var('SOABI'))"])
+            updated["python"] = python_id
+        node_version = self.capture(["node", "--version"]) + self.capture(["npm", "--version"])
+        app_manifests = [name for name in self.capture(["git", "ls-files", "apps"]).splitlines() if name.endswith("package.json")]
+        groups = {
+            "apps": (app_manifests + ["apps/yarn.lock", "apps/.yarnrc.yml"], ROOT / "apps/node_modules/.bin/ts-node"),
+            "node": (["sdks/node/package.json", "sdks/node/package-lock.json"], ROOT / "sdks/node/node_modules/.bin/napi"),
+        }
+        for name, (inputs, sentinel) in groups.items():
+            identity = self.fingerprint(inputs) + node_version
+            cached = previous.get(name) == identity and sentinel.exists()
+            with self.stage(f"deps-{name}", cached):
+                if not cached:
+                    self.make(f"test:e2e:deps:{name}")
+                updated[name] = identity
+        save(self.state / "dependencies.json", updated)
+        return updated
+
     def prepare(self):
+        dependencies = self.prepare_dependencies()
         old = load(self.state / "build.json")
         groups = {
             "runtime": (["src/boxlite", "src/shim", "src/guest", "src/shared", "src/deps", "scripts/build", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"], list((ROOT / "target/debug/runtime").glob("*"))),
-            "sdk-python": (["sdks/python/src", "sdks/python/boxlite", "sdks/python/Cargo.toml", "sdks/python/pyproject.toml"], list((ROOT / "sdks/python/boxlite").glob("*.so"))),
-            "sdk-node": (["sdks/node/src", "sdks/node/lib", "sdks/node/Cargo.toml", "sdks/node/package.json"], list((ROOT / "sdks/node/native").glob("*.node"))),
+            "sdk-python": (["sdks/python/src", "sdks/python/boxlite", "sdks/python/Cargo.toml", "sdks/python/pyproject.toml", "sdks/python/build.rs"], list((ROOT / "sdks/python/boxlite").glob("*.so"))),
+            "sdk-node": (["sdks/node/src", "sdks/node/lib", "sdks/node/Cargo.toml", "sdks/node/package.json", "sdks/node/package-lock.json", "sdks/node/tsconfig.json", "sdks/node/build.rs"], list((ROOT / "sdks/node/native").glob("*.node")) + [ROOT / "sdks/node/native/boxlite.js", ROOT / "sdks/node/dist/index.js"]),
             "sdk-c-go": (["sdks/c", "sdks/go"], [ROOT / "target/debug/libboxlite.a", ROOT / "target/debug/libboxlite.so"]),
             "cli": (["src/cli"], [ROOT / "target/debug/boxlite"]),
             "runner": (["apps/runner", "sdks/go", "apps/libs/common-go", "apps/libs/api-client-go", "apps/go.work", "apps/go.work.sum"], [self.state / "bin/runner"]),
@@ -349,12 +397,6 @@ class Environment:
         if self.remote:
             groups = {name: group for name, group in groups.items()
                       if name in ("sdk-python", "sdk-node", "sdk-c-go", "cli")}
-        if not (ROOT / ".venv/bin/python").exists():
-            self.make("_ensure-python-deps")
-        if not (ROOT / "apps/node_modules/.bin/ts-node").exists():
-            self.make("_ensure-apps-deps")
-        if self.capture([self.python, "-c", "import pytest_timeout"], check=False).returncode:
-            self.make("test:e2e:deps")
         runtime_prefixes = ["src/boxlite", "src/shared", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
         runtime_input = self.fingerprint(runtime_prefixes)
         if not self.remote:
@@ -368,6 +410,10 @@ class Environment:
             source = self.fingerprint(prefixes)
             if name != "proxies":
                 source += runtime_input
+            if name == "sdk-python":
+                source += dependencies["python"]
+            elif name == "sdk-node":
+                source += dependencies["node"]
             if name == "runner":
                 source += digest(ROOT / "target/debug/libboxlite.a") if (ROOT / "target/debug/libboxlite.a").exists() else "missing"
                 source += self.capture(["go", "version"])
@@ -387,11 +433,11 @@ class Environment:
                     self.make("runtime:debug")
                     artifacts = list((ROOT / "target/debug/runtime").glob("*"))
                 elif name == "sdk-python":
-                    self.make("dev:python", SETUP_DONE=1)
+                    self.make("test:e2e:build:python", SETUP_DONE=1)
                     artifacts = list((ROOT / "sdks/python/boxlite").glob("*.so"))
                 elif name == "sdk-node":
                     self.make("test:e2e:build:node", SETUP_DONE=1)
-                    artifacts = list((ROOT / "sdks/node/native").glob("*.node"))
+                    artifacts = list((ROOT / "sdks/node/native").glob("*.node")) + [ROOT / "sdks/node/native/boxlite.js", ROOT / "sdks/node/dist/index.js"]
                 elif name == "sdk-c-go":
                     self.make("dev:go", SETUP_DONE=1)
                 elif name == "cli":
@@ -410,7 +456,7 @@ class Environment:
         return changed
 
     def container(self, name, check=True):
-        result = self.capture(["docker", "inspect", f"{self.prefix}-{name}"], check=False)
+        result = self.capture(["docker", "container", "inspect", f"{self.prefix}-{name}"], check=False)
         if result.returncode:
             if check:
                 raise Failure(f"Container {name} absent: {result.stderr}")
@@ -431,7 +477,7 @@ class Environment:
         if info:
             self.assert_owner(info)
             binding = info.get("HostConfig", {}).get("PortBindings", {}).get(f"{inner}/tcp", [])
-            matches = any(row.get("HostIp") == "127.0.0.1" and row.get("HostPort") == str(self.ports[key]) for row in binding)
+            matches = info.get("Config", {}).get("Labels", {}).get("boxlite.e2e.image") == IMAGES[name] and any(row.get("HostIp") == "127.0.0.1" and row.get("HostPort") == str(self.ports[key]) for row in binding)
             if not matches:
                 self.capture(["docker", "rm", "-f", f"{self.prefix}-{name}"])
             else:
@@ -440,20 +486,22 @@ class Environment:
                     self.new_containers.append(name)
                 return
         image_file = self.state / f"image-{name}.json"
-        image = load(image_file).get("digest", IMAGES[name])
+        image = IMAGES[name]
         inspected = self.capture(["docker", "image", "inspect", image], check=False)
         if inspected.returncode:
-            self.command(["docker", "pull", image], timeout=300, log=f"dependency-{name}.log")
+            if name == "minio":
+                self.make("test:e2e:build:minio", E2E_STATE_DIR=self.state)
+            else:
+                self.command(["docker", "pull", image], timeout=300, log=f"dependency-{name}.log")
             inspected = self.capture(["docker", "image", "inspect", image], check=False)
         if inspected.returncode:
             raise Failure(f"Cannot inspect {image}: {inspected.stderr}")
         metadata = json.loads(inspected.stdout)[0]
-        image = (metadata.get("RepoDigests") or [metadata["Id"]])[0]
-        save(image_file, dict(tag=IMAGES[name], digest=image))
+        save(image_file, dict(reference=image, digest=metadata["Id"]))
         if self.cancelled.is_set():
             return
         args = ["docker", "run", "-d", "--name", f"{self.prefix}-{name}", "--label", f"boxlite.e2e.state={self.state}",
-                "-p", f"127.0.0.1:{self.ports[key]}:{inner}"]
+                "--label", f"boxlite.e2e.image={image}", "-p", f"127.0.0.1:{self.ports[key]}:{inner}"]
         env = {}
         commands = []
         if name == "postgres":
@@ -538,6 +586,8 @@ class Environment:
     def start_process(self, name, argv, cwd, health, timeout):
         service_env = load(self.state / "env.json")
         source_id = self.fingerprint(["apps/api/src", "apps/api/tsconfig.app.json", "apps/libs"]) if name == "api" else digest(Path(argv[0]))
+        if name == "api":
+            source_id += load(self.state / "dependencies.json").get("apps", "")
         if name == "runner":
             source_id += json.dumps(load(self.state / "build.json").get("runtime", {}).get("artifacts", {}), sort_keys=True)
         config_id = hashlib.sha256(json.dumps([argv, service_env, source_id], sort_keys=True).encode()).hexdigest()

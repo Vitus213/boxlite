@@ -55,6 +55,29 @@ class LifecycleTest(unittest.TestCase):
         with self.assertRaisesRegex(manage.Failure, "ownership conflict"):
             self.environment.assert_owner({"Name": "unrelated", "Config": {"Labels": {"boxlite.e2e.state": "/someone/else"}}})
 
+    def test_dependency_cache_reinstalls_only_when_sentinel_missing(self):
+        scratch = Path(self.scratch.name)
+        self.environment.python = str(scratch / "missing-python")
+        calls = []
+
+        def fake_make(target):
+            calls.append(target)
+            sentinel = {"test:e2e:deps:apps": "apps/node_modules/.bin/ts-node",
+                        "test:e2e:deps:node": "sdks/node/node_modules/.bin/napi"}.get(target)
+            if sentinel:
+                (scratch / sentinel).parent.mkdir(parents=True, exist_ok=True)
+                (scratch / sentinel).write_text("")
+
+        with patch.object(manage, "ROOT", scratch), \
+                patch.object(self.environment, "fingerprint", side_effect=lambda prefixes: "id"), \
+                patch.object(self.environment, "capture", side_effect=lambda argv, **kwargs: ""), \
+                patch.object(self.environment, "make", side_effect=fake_make):
+            self.environment.prepare_dependencies()
+            self.assertEqual(calls, ["test:e2e:deps", "test:e2e:deps:apps", "test:e2e:deps:node"])
+            calls.clear()
+            self.environment.prepare_dependencies()
+            self.assertEqual(calls, ["test:e2e:deps"])
+
 
 if __name__ == "__main__":
     unittest.main()
