@@ -32,7 +32,7 @@ impl ContainerExecutor {
     ) -> BoxliteResult<ExecHandle> {
         self.spawn_request(req, Some(workload))
             .await
-            .map_err(SpawnFailure::into_boxlite)
+            .map_err(SpawnFailure::into_error)
     }
 
     pub(crate) async fn spawn_attempt(
@@ -112,15 +112,15 @@ pub struct GuestExecutor;
 impl GuestExecutor {
     /// Spawn directly in the guest.
     ///
-    /// A program that cannot be started is [`SpawnFailure::Rejected`], the
-    /// same POSIX outcome the container executor reports.
+    /// A refused program is [`SpawnFailure::Rejected`]; every other failure,
+    /// including an unusable working directory, is [`SpawnFailure::Failed`].
     pub(crate) async fn spawn_attempt(
         &self,
         req: &ExecRequest,
     ) -> Result<ExecHandle, SpawnFailure> {
-        // `Command::spawn` reports a missing working directory as `ENOENT`
-        // too, and that is a configuration fault, not a verdict about the
-        // program. Resolve it before the spawn so the two stay distinct.
+        // `Command::spawn` also reports an unusable working directory as
+        // `ENOENT`. That is a configuration fault, not an outcome for the
+        // command, so checking it first keeps the two apart.
         if !req.workdir.is_empty() && !std::path::Path::new(&req.workdir).is_dir() {
             return Err(SpawnFailure::Failed(BoxliteError::Internal(format!(
                 "working directory '{}' is not a directory",
@@ -136,10 +136,10 @@ impl GuestExecutor {
     }
 }
 
-/// `execve`'s refusal is a verdict about the caller's program: missing and
-/// non-executable files are results, not guest faults. The wording matches
-/// the container executor so every exec caller sees one message shape.
-fn spawn_failure(program: &str, error: std::io::Error) -> SpawnFailure {
+/// Turn `execve`'s error into a POSIX result about the program (missing: 127,
+/// not executable: 126) or a guest fault. Codes and wording match the
+/// container executor, so every exec caller sees one message shape.
+fn classify_spawn_error(program: &str, error: std::io::Error) -> SpawnFailure {
     let rejection = match error.kind() {
         std::io::ErrorKind::NotFound => CommandRejection {
             message: format!("executable '{program}' not found in $PATH"),
@@ -193,7 +193,7 @@ fn spawn_with_pipes(req: &ExecRequest) -> Result<ExecHandle, SpawnFailure> {
 
     let mut child = cmd
         .spawn()
-        .map_err(|error| spawn_failure(&req.program, error))?;
+        .map_err(|error| classify_spawn_error(&req.program, error))?;
 
     let pid = child.id();
 
@@ -280,7 +280,7 @@ fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> Result<ExecHandle, Sp
 
     let mut child = cmd
         .spawn()
-        .map_err(|error| spawn_failure(&req.program, error))?;
+        .map_err(|error| classify_spawn_error(&req.program, error))?;
 
     let pid = child.id();
 
@@ -357,7 +357,7 @@ mod tests {
         }
     }
 
-    fn rejection(result: Result<ExecHandle, SpawnFailure>) -> CommandRejection {
+    fn expect_rejection(result: Result<ExecHandle, SpawnFailure>) -> CommandRejection {
         if let Err(SpawnFailure::Rejected(rejection)) = result {
             rejection
         } else {
@@ -367,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_program_is_rejected_with_127() {
-        let rejection = rejection(
+        let rejection = expect_rejection(
             GuestExecutor
                 .spawn_attempt(&request("/pol55/no-such-program"))
                 .await,
@@ -386,7 +386,7 @@ mod tests {
         let program = dir.path().join("not-executable");
         std::fs::write(&program, "#!/bin/sh\n").unwrap();
 
-        let rejection = rejection(
+        let rejection = expect_rejection(
             GuestExecutor
                 .spawn_attempt(&request(program.to_str().unwrap()))
                 .await,
@@ -413,15 +413,15 @@ mod tests {
             modes: Vec::new(),
         });
 
-        let rejection = rejection(GuestExecutor.spawn_attempt(&req).await);
+        let rejection = expect_rejection(GuestExecutor.spawn_attempt(&req).await);
 
         assert_eq!(rejection.exit_code, 127);
     }
 
     #[tokio::test]
-    async fn a_spawn_error_below_the_exec_verdicts_stays_a_failure() {
-        // ENOTDIR is not a statement about the program, so it must not
-        // masquerade as an exec verdict.
+    async fn a_directory_error_stays_a_spawn_failure() {
+        // ENOTDIR says nothing about the program, so it must not be reported
+        // as an exit status.
         let result = GuestExecutor
             .spawn_attempt(&request("/etc/passwd/not-a-directory"))
             .await;
@@ -434,7 +434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unusable_workdir_is_a_fault_not_a_verdict() {
+    async fn a_missing_workdir_is_a_spawn_failure() {
         let mut req = request("/pol55/no-such-program");
         req.workdir = "/pol55/no-such-directory".to_string();
 

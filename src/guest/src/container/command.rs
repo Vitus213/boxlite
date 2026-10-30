@@ -265,11 +265,7 @@ impl ContainerCommand {
     /// ```
     #[allow(dead_code)] // Public API; ContainerExecutor uses spawn_build() for two-phase locking
     pub async fn spawn(self) -> BoxliteResult<ExecHandle> {
-        match self
-            .spawn_build()
-            .await
-            .map_err(SpawnFailure::into_boxlite)?
-        {
+        match self.spawn_build().await.map_err(SpawnFailure::into_error)? {
             SpawnResult::Ready(handle) => Ok(handle),
             SpawnResult::PtyPending(pending) => pending.finish(),
         }

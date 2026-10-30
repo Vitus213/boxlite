@@ -124,8 +124,8 @@ impl OutputManager {
         manager
     }
 
-    /// Reuse the bounded replay buffer for a process that could not be launched.
-    pub(crate) async fn completed(mut diagnostic: String, tty: bool) -> Self {
+    /// Buffer a diagnostic for a process that could not be launched.
+    pub(crate) async fn completed_with_diagnostic(mut diagnostic: String, tty: bool) -> Self {
         diagnostic.push('\n');
         let manager = Self::new(None, None);
         let source = if tty {

@@ -110,7 +110,7 @@ impl ExecutionState {
 
     /// A rejected spawn has output and an exit status, but no process or file descriptors.
     pub(super) async fn rejected(rejection: crate::container::CommandRejection, tty: bool) -> Self {
-        let output = OutputManager::completed(rejection.message, tty).await;
+        let output = OutputManager::completed_with_diagnostic(rejection.message, tty).await;
         let consumer_lease = output.consumer_lease_flag();
         Self {
             inner: Arc::new(Mutex::new(Inner {

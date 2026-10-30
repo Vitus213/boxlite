@@ -876,9 +876,9 @@ mod container_id_path_tests {
         );
     }
 
-    /// A fault that is not an exec verdict still reaches the host as an error.
+    /// A failure that is not a command refusal still reaches the host as an error.
     #[tokio::test]
-    async fn guest_executor_spawn_fault_is_reported_as_an_error() {
+    async fn guest_executor_spawn_failure_is_reported_as_an_error() {
         use boxlite_shared::ExecRequest;
         use std::collections::HashMap;
 
@@ -896,7 +896,7 @@ mod container_id_path_tests {
 
         let response = start_execution(&server, req, None).await;
 
-        let error = response.error.expect("a spawn fault must stay an error");
+        let error = response.error.expect("a spawn failure must stay an error");
         assert_eq!(error.reason, "spawn_failed", "{}", error.detail);
     }
 

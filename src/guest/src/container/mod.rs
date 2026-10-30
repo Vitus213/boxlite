@@ -125,7 +125,7 @@ impl SpawnFailure {
     /// Collapse onto the error channel, for callers that have no POSIX
     /// outcome to report (an internal SSH workload that cannot start is a
     /// fault, not an exit status).
-    pub(crate) fn into_boxlite(self) -> BoxliteError {
+    pub(crate) fn into_error(self) -> BoxliteError {
         match self {
             Self::Rejected(rejection) => BoxliteError::Execution(rejection.message),
             Self::Failed(error) => error,
