@@ -194,10 +194,18 @@ Command execution error.
 - Execution timeout
 - Streaming I/O error
 
-A missing or non-executable command is *not* an `Execution` error: the guest
-reports it as a finished execution with the POSIX status, so `wait()` returns
-`exit_code == 127` (not found) or `126` (found, not executable) and the
-diagnostic arrives on stderr.
+For `exec`, a missing or non-executable command is *not* an `Execution` error:
+the guest reports a finished execution, so `wait()` returns `exit_code == 127`
+(not found) or `126` (found, not executable). The diagnostic arrives on stderr
+without a TTY, or on merged stdout with a TTY. Rejection of the box's init
+command during `start()` remains an `InvalidArgument` error; `boxlite run`
+prints an error and exits `1`.
+
+**Maintenance contract:** The guest classifier recognizes youki's init-error
+marker and the fixed verdict suffix: `not found in $PATH` maps to `127`, and
+`does not have correct permissions` maps to `126`. Match the suffix, never
+substrings in the command name or path; those may contain either verdict.
+Other startup failures remain errors.
 
 **Example:**
 ```text

@@ -874,6 +874,82 @@ mod container_id_path_tests {
     }
 
     #[tokio::test]
+    async fn rejected_executions_finish_and_replay_on_the_requested_stream() {
+        for (tty, exit_code) in [(false, 127), (true, 126)] {
+            let server = GuestServer::new(GuestLayout::new());
+            let state = ExecutionState::rejected(
+                crate::container::CommandRejection {
+                    message: "executable 'unavailable' cannot run".into(),
+                    exit_code,
+                },
+                tty,
+            )
+            .await;
+            assert!(
+                server
+                    .registry
+                    .register("rejected".into(), state.clone())
+                    .await
+            );
+
+            let exit = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                server.wait_execution("rejected"),
+            )
+            .await
+            .expect("a rejection must finish without a process")
+            .unwrap();
+            assert_eq!(exit.exit_code, exit_code);
+            assert_eq!(exit.signal, 0);
+            assert!(!server.kill_execution("rejected", 15, true).await.unwrap());
+            assert!(matches!(
+                server
+                    .send_execution_input(
+                        ExecStdin {
+                            execution_id: "rejected".into(),
+                            data: b"input after rejection".to_vec(),
+                            close: true,
+                        },
+                        futures::stream::empty(),
+                    )
+                    .await,
+                Err(ExecutionError::HandleUnavailable)
+            ));
+
+            // Terminal output must remain replayable even if wait completed first.
+            let snapshot = state.wait_terminal_snapshot("rejected").await;
+            let retained_bytes = state.retained_output_bytes().await;
+            assert!(
+                server
+                    .registry
+                    .retain("rejected", snapshot, retained_bytes)
+                    .await
+            );
+            let mut output = server.attach_execution("rejected").await.unwrap();
+            let data = match output.recv().await.unwrap().unwrap().event.unwrap() {
+                exec_output::Event::Stdout(data) if tty => data.data,
+                exec_output::Event::Stderr(data) if !tty => data.data,
+                event => panic!("diagnostic arrived on the wrong stream: {event:?}"),
+            };
+            assert!(data.ends_with(b"\n"), "diagnostic must terminate its line");
+            match output.recv().await.unwrap().unwrap().event.unwrap() {
+                exec_output::Event::Stdout(end) if tty => {
+                    assert_eq!(end.total_bytes, Some(data.len() as u64));
+                    assert!(end.data.is_empty());
+                }
+                exec_output::Event::Stderr(end) if !tty => {
+                    assert_eq!(end.total_bytes, Some(data.len() as u64));
+                    assert!(end.data.is_empty());
+                }
+                event => panic!("missing diagnostic stream end: {event:?}"),
+            }
+            assert!(output.recv().await.is_none());
+            assert_eq!(server.wait_execution("rejected").await.unwrap(), exit);
+            server.registry.shutdown_all(1_000).await;
+        }
+    }
+
+    #[tokio::test]
     async fn tombstone_routes_terminal_rpcs_without_reopening_the_process() {
         let server = GuestServer::new(GuestLayout::new());
         server

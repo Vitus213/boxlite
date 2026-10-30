@@ -68,11 +68,14 @@ the portable contract above.
 
 ### Unreleased: exec command rejections (POL-55)
 
-Missing executables now complete with exit status `127`; non-executable files
-complete with `126`. The guest diagnostic arrives on stderr through the normal
+For `exec`, missing executables now complete with exit status `127`;
+non-executable files complete with `126`. The guest diagnostic arrives on
+stderr without a TTY, or on merged stdout with a TTY, through the normal
 execution streams instead of a nested internal error or HTTP 500. This applies
-to local and REST executions; other nonzero process exit codes are unchanged.
-See [execution error handling](errors.md#executionstring).
+to local and REST `exec` executions; other nonzero process exit codes are unchanged.
+Rejection of the box's init command during `start()` remains an error, so
+`boxlite run` prints an error and exits `1`. See
+[execution error handling](errors.md#executionstring).
 
 ### Image API migration (breaking change)
 

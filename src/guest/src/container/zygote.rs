@@ -125,9 +125,9 @@ pub(crate) struct CommandRejection {
 fn command_rejection(error: &libcontainer::error::LibcontainerError) -> Option<CommandRejection> {
     let text = error.to_string();
     let (_, reported_by_init) = text.split_once("error in executing process : ")?;
-    let exit_code = if reported_by_init.contains("not found in $PATH") {
+    let exit_code = if reported_by_init.ends_with("' not found in $PATH") {
         127
-    } else if reported_by_init.contains("does not have correct permissions") {
+    } else if reported_by_init.ends_with("' does not have correct permissions") {
         126
     } else {
         return None;
@@ -1694,6 +1694,33 @@ mod tests {
         );
         // POSIX: present but not executable exits 126.
         assert_eq!(rejection.exit_code, 126);
+    }
+
+    #[test]
+    fn command_verdict_is_not_taken_from_the_executable_path() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["not found in $PATH", "does not have correct permissions"] {
+            let parent = dir.path().join(name);
+            std::fs::create_dir(&parent).unwrap();
+            let command = parent.join(name);
+            std::fs::write(&command, "#!/bin/sh\n").unwrap();
+            let error = relayed_command_check(command.to_str().unwrap(), "/usr/bin:/bin");
+
+            let rejection = command_rejection(&error).expect("the file is not executable");
+            assert_eq!(rejection.exit_code, 126, "{}", rejection.message);
+        }
+    }
+
+    #[test]
+    fn a_missing_command_named_after_a_permission_verdict_still_returns_127() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = relayed_command_check(
+            "does not have correct permissions",
+            dir.path().to_str().unwrap(),
+        );
+
+        let rejection = command_rejection(&error).expect("the command does not exist");
+        assert_eq!(rejection.exit_code, 127, "{}", rejection.message);
     }
 
     #[test]
