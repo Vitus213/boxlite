@@ -118,6 +118,15 @@ impl GuestExecutor {
         &self,
         req: &ExecRequest,
     ) -> Result<ExecHandle, SpawnFailure> {
+        // `Command::spawn` reports a missing working directory as `ENOENT`
+        // too, and that is a configuration fault, not a verdict about the
+        // program. Resolve it before the spawn so the two stay distinct.
+        if !req.workdir.is_empty() && !std::path::Path::new(&req.workdir).is_dir() {
+            return Err(SpawnFailure::Failed(BoxliteError::Internal(format!(
+                "working directory '{}' is not a directory",
+                req.workdir
+            ))));
+        }
         if let Some(tty) = &req.tty {
             let config = PtyConfig::try_from(tty)?;
             spawn_with_pty(req, config)
@@ -349,12 +358,10 @@ mod tests {
     }
 
     fn rejection(result: Result<ExecHandle, SpawnFailure>) -> CommandRejection {
-        match result {
-            Err(SpawnFailure::Rejected(rejection)) => rejection,
-            Err(SpawnFailure::Failed(error)) => {
-                panic!("the command must be rejected, not faulty: {error}")
-            }
-            Ok(_) => panic!("the command must be rejected, not run"),
+        if let Err(SpawnFailure::Rejected(rejection)) = result {
+            rejection
+        } else {
+            panic!("the command must be rejected, not run or faulted")
         }
     }
 
@@ -392,6 +399,50 @@ mod tests {
                 .ends_with("does not have correct permissions"),
             "{}",
             rejection.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pty_exec_rejects_a_missing_program_with_127() {
+        let mut req = request("/pol55/no-such-pty-program");
+        req.tty = Some(boxlite_shared::TtyConfig {
+            rows: 24,
+            cols: 80,
+            x_pixels: 0,
+            y_pixels: 0,
+            modes: Vec::new(),
+        });
+
+        let rejection = rejection(GuestExecutor.spawn_attempt(&req).await);
+
+        assert_eq!(rejection.exit_code, 127);
+    }
+
+    #[tokio::test]
+    async fn a_spawn_error_below_the_exec_verdicts_stays_a_failure() {
+        // ENOTDIR is not a statement about the program, so it must not
+        // masquerade as an exec verdict.
+        let result = GuestExecutor
+            .spawn_attempt(&request("/etc/passwd/not-a-directory"))
+            .await;
+
+        assert!(
+            matches!(result, Err(SpawnFailure::Failed(_))),
+            "ENOTDIR must stay a spawn failure"
+        );
+        drop(result);
+    }
+
+    #[tokio::test]
+    async fn an_unusable_workdir_is_a_fault_not_a_verdict() {
+        let mut req = request("/pol55/no-such-program");
+        req.workdir = "/pol55/no-such-directory".to_string();
+
+        let result = GuestExecutor.spawn_attempt(&req).await;
+
+        assert!(
+            matches!(result, Err(SpawnFailure::Failed(_))),
+            "a missing workdir must stay a spawn failure"
         );
     }
 

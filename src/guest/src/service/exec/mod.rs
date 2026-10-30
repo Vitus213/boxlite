@@ -876,6 +876,30 @@ mod container_id_path_tests {
         );
     }
 
+    /// A fault that is not an exec verdict still reaches the host as an error.
+    #[tokio::test]
+    async fn guest_executor_spawn_fault_is_reported_as_an_error() {
+        use boxlite_shared::ExecRequest;
+        use std::collections::HashMap;
+
+        let server = GuestServer::new(GuestLayout::new());
+        let req = ExecRequest {
+            execution_id: None,
+            program: "sh".to_string(),
+            args: Vec::new(),
+            env: HashMap::from([("BOXLITE_EXECUTOR".to_string(), "guest".to_string())]),
+            workdir: "/pol55/no-such-directory".to_string(),
+            timeout_ms: 0,
+            tty: None,
+            user: None,
+        };
+
+        let response = start_execution(&server, req, None).await;
+
+        let error = response.error.expect("a spawn fault must stay an error");
+        assert_eq!(error.reason, "spawn_failed", "{}", error.detail);
+    }
+
     /// `BOXLITE_EXECUTOR=guest` runs the command directly in the guest. A
     /// program that cannot be executed is the caller's POSIX outcome there
     /// too, not a spawn fault, so it must publish like any exec result.
