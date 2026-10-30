@@ -1,5 +1,6 @@
 """Exercise actual child processes and environment ownership boundaries."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import socket
@@ -113,6 +114,57 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(first, self.environment.recipe_identity())
             tool_version = "2"
             self.assertNotEqual(first, self.environment.recipe_identity())
+
+    def test_credential_identity_tracks_password_and_dex_config(self):
+        self.environment.env["PGPASSWORD"] = "one"
+        first = self.environment.credential_identity("postgres")
+        self.environment.env["PGPASSWORD"] = "two"
+        self.assertNotEqual(first, self.environment.credential_identity("postgres"))
+        config = self.environment.state / "dex.yaml"
+        config.write_text("issuer: one\n")
+        first = self.environment.credential_identity("dex")
+        config.write_text("issuer: two\n")
+        self.assertNotEqual(first, self.environment.credential_identity("dex"))
+
+    def test_dependency_recreates_postgres_volume_when_credentials_change(self):
+        self.environment.env["PGPASSWORD"] = "new-password"
+        name = f"{self.environment.prefix}-postgres"
+        stale = {
+            "Name": f"/{name}",
+            "State": {"Running": True},
+            "Config": {"Labels": {
+                "boxlite.e2e.state": str(self.environment.state),
+                "boxlite.e2e.image": manage.IMAGES["postgres"],
+                "boxlite.e2e.credentials": "stale",
+            }},
+            "HostConfig": {"PortBindings": {
+                "5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(self.environment.ports["POSTGRES"])}],
+            }},
+        }
+        calls = []
+
+        def fake_capture(argv, **kwargs):
+            if argv[:3] == ["docker", "container", "inspect"]:
+                return subprocess.CompletedProcess(argv, 0, json.dumps([stale]), "")
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return subprocess.CompletedProcess(argv, 0, json.dumps([{"Id": "sha256:image"}]), "")
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch.object(self.environment, "capture", side_effect=fake_capture):
+            self.environment.dependency("postgres")
+
+        self.assertIn(["docker", "rm", "-f", name], calls)
+        self.assertIn(["docker", "volume", "rm", "-f", name], calls)
+        run = next(argv for argv in calls if argv[:2] == ["docker", "run"])
+        self.assertIn(f"boxlite.e2e.credentials={self.environment.credential_identity('postgres')}", run)
+
+    def test_status_rejects_a_foreign_container(self):
+        foreign = {"Name": "/foreign", "State": {"Running": True},
+                   "Config": {"Labels": {"boxlite.e2e.state": "/somewhere/else"}}}
+        with patch.object(self.environment, "container", return_value=foreign):
+            with self.assertRaisesRegex(manage.Failure, "ownership conflict"):
+                self.environment.status()
 
 
 if __name__ == "__main__":

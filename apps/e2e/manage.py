@@ -202,7 +202,7 @@ class Environment:
         self.command(["make", "--no-print-directory", target, *[f"{k}={v}" for k, v in variables.items()]])
 
     def doctor(self, strict=True):
-        required = ("make", "node", "corepack", "gcc", "protoc") if self.remote else ("make", "node", "corepack", "go", "gcc", "protoc", "docker")
+        required = ("make", "node", "corepack", "gcc", "protoc", "cargo", "rustc") if self.remote else ("make", "node", "corepack", "go", "gcc", "protoc", "docker", "psql", "cargo", "rustc")
         missing = [name for name in required if not shutil.which(name)]
         if sys.version_info < (3, 11):
             missing.append("Python 3.11+")
@@ -237,18 +237,20 @@ class Environment:
             return False
 
     def check_ports(self):
-        owned = {"API": "api", "RUNNER": "runner", "PROXY": "proxy", "REGISTRY_PROXY": "registry-proxy"}
+        native = {"API": "api", "RUNNER": "runner", "PROXY": "proxy", "REGISTRY_PROXY": "registry-proxy"}
+        native_keys = {"API": "PORT", "RUNNER": "API_PORT", "PROXY": "PROXY_PORT", "REGISTRY_PROXY": "REGISTRY_PROXY_PORT"}
+        dependency_names = {"POSTGRES", "REDIS", "REGISTRY", "DEX", "MINIO"}
         previous = load(self.state / "env.json")
-        native_ports = {"API": "PORT", "RUNNER": "API_PORT", "PROXY": "PROXY_PORT", "REGISTRY_PROXY": "REGISTRY_PROXY_PORT"}
         for name, port in self.ports.items():
-            if name in owned and str(port) == previous.get(native_ports[name]) and self.process_matches(owned[name]):
+            if name in native and str(port) == previous.get(native_keys[name]) and self.process_matches(native[name]):
                 continue
-            container = self.container(name.lower(), check=False)
-            if container and container.get("State", {}).get("Running"):
-                self.assert_owner(container)
-                bindings = container.get("HostConfig", {}).get("PortBindings", {})
-                if any(row.get("HostIp") == "127.0.0.1" and row.get("HostPort") == str(port) for rows in bindings.values() for row in rows):
-                    continue
+            if name in dependency_names:
+                container = self.container(name.lower(), check=False)
+                if container and container.get("State", {}).get("Running"):
+                    self.assert_owner(container)
+                    bindings = container.get("HostConfig", {}).get("PortBindings", {})
+                    if any(row.get("HostIp") == "127.0.0.1" and row.get("HostPort") == str(port) for rows in bindings.values() for row in rows):
+                        continue
             with socket.socket() as sock:
                 if sock.connect_ex(("127.0.0.1", port)) == 0:
                     raise Failure(f"Port conflict: {name} 127.0.0.1:{port}; leave the listener running and configure BOXLITE_E2E_{name}_PORT")
@@ -488,18 +490,40 @@ class Environment:
         if labels.get("boxlite.e2e.state") != str(self.state):
             raise Failure(f"Container ownership conflict: {info.get('Name')}")
 
+    DEPENDENCY_PORTS = {"postgres": ("POSTGRES", 5432), "redis": ("REDIS", 6379),
+                        "registry": ("REGISTRY", 5000), "dex": ("DEX", 5556), "minio": ("MINIO", 9000)}
+
+    def credential_identity(self, name):
+        """Fingerprint the values a running dependency was configured with."""
+        if name == "postgres":
+            value = self.env.get("PGPASSWORD", "")
+        elif name == "minio":
+            value = self.env.get("S3_SECRET_KEY", "")
+        elif name == "dex":
+            config = self.state / "dex.yaml"
+            value = digest(config) if config.exists() else "missing"
+        else:
+            value = ""
+        return hashlib.sha256(value.encode()).hexdigest()
+
     def dependency(self, name):
         if self.cancelled.is_set():
             return
-        mappings = {"postgres": ("POSTGRES", 5432), "redis": ("REDIS", 6379), "registry": ("REGISTRY", 5000), "dex": ("DEX", 5556), "minio": ("MINIO", 9000)}
+        mappings = self.DEPENDENCY_PORTS
         key, inner = mappings[name]
         info = self.container(name, check=False)
         if info:
             self.assert_owner(info)
+            labels = info.get("Config", {}).get("Labels", {})
             binding = info.get("HostConfig", {}).get("PortBindings", {}).get(f"{inner}/tcp", [])
-            matches = info.get("Config", {}).get("Labels", {}).get("boxlite.e2e.image") == IMAGES[name] and any(row.get("HostIp") == "127.0.0.1" and row.get("HostPort") == str(self.ports[key]) for row in binding)
-            if not matches:
+            matches = labels.get("boxlite.e2e.image") == IMAGES[name] and any(row.get("HostIp") == "127.0.0.1" and row.get("HostPort") == str(self.ports[key]) for row in binding)
+            credentials = labels.get("boxlite.e2e.credentials") == self.credential_identity(name)
+            if not matches or not credentials:
                 self.capture(["docker", "rm", "-f", f"{self.prefix}-{name}"])
+                if not credentials and name == "postgres":
+                    # POSTGRES_PASSWORD is consumed only by initdb, so the old
+                    # volume keeps the old password no matter the new env file.
+                    self.capture(["docker", "volume", "rm", "-f", f"{self.prefix}-postgres"], check=False)
             else:
                 if not info["State"]["Running"]:
                     self.capture(["docker", "start", f"{self.prefix}-{name}"])
@@ -521,7 +545,9 @@ class Environment:
         if self.cancelled.is_set():
             return
         args = ["docker", "run", "-d", "--name", f"{self.prefix}-{name}", "--label", f"boxlite.e2e.state={self.state}",
-                "--label", f"boxlite.e2e.image={image}", "-p", f"127.0.0.1:{self.ports[key]}:{inner}"]
+                "--label", f"boxlite.e2e.image={image}",
+                "--label", f"boxlite.e2e.credentials={self.credential_identity(name)}",
+                "-p", f"127.0.0.1:{self.ports[key]}:{inner}"]
         env = {}
         commands = []
         if name == "postgres":
@@ -715,6 +741,8 @@ class Environment:
                 failed.append(name)
         for name in IMAGES:
             info = self.container(name, check=False)
+            if info:
+                self.assert_owner(info)
             alive = bool(info and info.get("State", {}).get("Running"))
             print(f"{name}: {'running' if alive else 'stopped'}")
             if not alive:
