@@ -358,6 +358,7 @@ class Environment:
     def record_inputs(self):
         self.record["inputs"] = dict(
             source=self.fingerprint(["apps/e2e", "apps/api", "apps/libs", "make", "scripts/test/rest", "flake.nix", "flake.lock"]),
+            recipe=self.recipe_identity(),
             builds=load(self.state / "build.json"),
             images={name: load(self.state / f"image-{name}.json") for name in IMAGES} if not self.remote else {},
             versions={name: self.capture(argv) for name, argv in {
