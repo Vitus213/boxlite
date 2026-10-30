@@ -65,7 +65,6 @@ own.
 | `mbuild-release.yml` | dispatch, `workflow_call` | yes | The release line's images, tagged `v<X.Y.Z>-<sha>`: publish a version into dev, or promote it to prod. One job per artifact, and a version the target already holds is refused rather than skipped |
 | `mbuild-release-on-release.yml` | release | — | A stable published release dispatches `mbuild-release` from `main` to publish its application images into dev |
 | `e2e-local.yml` | push, `pull_request_target`, dispatch | — | VM-based tests on a self-hosted GCP VM runner. Needs `/dev/kvm`; PRs need the `e2e-local` label |
-| `e2e-harness.yml` | PR, push | — | Lifecycle, reporting and driver-resolution checks for the managed E2E harness; no KVM, containers or network |
 | `build-box-images.yml` | PR, push, dispatch | — | Builds changed flavors for both arches; shared inputs and manual runs build every flavor |
 | `release-box-images.yml` | `apps/box-images/v*` tag, dispatch | — | The only workflow that writes to GHCR |
 
@@ -99,6 +98,15 @@ dispatch; not weekly, because `flake.lock` pins its inputs. It is not yet in
 becomes required once it has proven stable. It compiles through sccache but
 does not cache `/nix/store`. Ubuntu still has `/usr/lib`, so it misses
 regressions that break only on NixOS.
+The `e2e-harness` job runs when the managed E2E code, its tests, or the
+dependency lock contract changes (`apps/e2e`, `tests/scripts`,
+`make/test.mk`, the workflow and the setup-python action itself): it syncs
+the managed E2E lockfile on a clean Python and runs the offline harness
+suite, so lock drift or a harness regression fails in CI before the next
+local run. It is required through `Test (conclusion)`. The full managed
+E2E stack stays local on purpose: the same pytest cases already run against
+a stage in `e2e-cloud`, and the self-hosted KVM runner is owned by
+`e2e-local`.
 Marking a PR **Ready for review** triggers the SDK matrix and both Go analyzers
 without requiring another commit. When a user returns it to draft, the new run
 cancels the prior Test run and runs the lightweight selection. The author-review bot uses `GITHUB_TOKEN`;
