@@ -333,6 +333,25 @@ class Environment:
         result.update(self.capture(["rustc", "--version"]).encode())
         return result.hexdigest()
 
+    BUILD_ENV = ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET",
+                 "CARGO_INCREMENTAL", "RUSTC_WRAPPER", "RUSTUP_TOOLCHAIN", "CC", "CXX",
+                 "CFLAGS", "CXXFLAGS", "LDFLAGS", "GOFLAGS", "GOOS", "GOARCH", "CGO_ENABLED",
+                 "BOXLITE_CARGO_LOCKED")
+
+    def recipe_identity(self):
+        """Hash the build recipes, flags and toolchains, not only their inputs."""
+        result = hashlib.sha256(self.fingerprint(["make", "scripts/build"]).encode())
+        for key in self.BUILD_ENV:
+            result.update(f"{key}={self.env.get(key, '')}\0".encode())
+        for argv in (["rustc", "-vV"], ["cargo", "-V"], ["gcc", "--version"], ["cc", "--version"],
+                     ["go", "version"], ["node", "--version"], ["npm", "--version"],
+                     ["corepack", "--version"], ["protoc", "--version"]):
+            if not shutil.which(argv[0]):
+                continue
+            result.update(self.capture(argv).encode())
+            result.update(b"\0")
+        return result.hexdigest()
+
     def record_inputs(self):
         self.record["inputs"] = dict(
             source=self.fingerprint(["apps/e2e", "apps/api", "apps/libs", "make", "scripts/test/rest", "flake.nix", "flake.lock"]),
@@ -405,9 +424,10 @@ class Environment:
             runtime_input += hashlib.sha256((submodules + submodule_diff).encode()).hexdigest()
         updated = dict(old)
         archive_before = old.get("archive")
+        recipe = self.recipe_identity()
         changed = False
         for name, (prefixes, artifacts) in groups.items():
-            source = self.fingerprint(prefixes)
+            source = self.fingerprint(prefixes) + recipe
             if name != "proxies":
                 source += runtime_input
             if name == "sdk-python":

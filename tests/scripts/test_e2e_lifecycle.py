@@ -83,6 +83,37 @@ class LifecycleTest(unittest.TestCase):
             self.environment.prepare_dependencies()
             self.assertEqual(calls, ["test:e2e:deps", "test:e2e:deps:apps", "test:e2e:deps:node"])
 
+    def test_recipe_identity_tracks_recipes_flags_and_toolchain(self):
+        scratch = Path(self.scratch.name)
+        makefile = scratch / "make/build.mk"
+        makefile.parent.mkdir(parents=True)
+        makefile.write_text("cli:\n\tcargo build -p boxlite-cli\n")
+        script = scratch / "scripts/build/build-runtime.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("echo build\n")
+        tool_version = "1"
+
+        def fake_capture(argv, **kwargs):
+            if argv[:2] == ["git", "ls-files"]:
+                return "make/build.mk\0scripts/build/build-runtime.sh\0"
+            if argv[0] == "rustc" and argv[-1] == "--version":
+                return "rustc 1.90.0"
+            return f"{' '.join(argv)} v{tool_version}"
+
+        with patch.object(manage, "ROOT", scratch), \
+                patch.object(self.environment, "capture", side_effect=fake_capture), \
+                patch.object(manage.shutil, "which", return_value="/usr/bin/tool"):
+            first = self.environment.recipe_identity()
+            makefile.write_text("cli:\n\tcargo build --release -p boxlite-cli\n")
+            self.assertNotEqual(first, self.environment.recipe_identity())
+            makefile.write_text("cli:\n\tcargo build -p boxlite-cli\n")
+            self.environment.env["RUSTFLAGS"] = "-C target-cpu=native"
+            self.assertNotEqual(first, self.environment.recipe_identity())
+            self.environment.env.pop("RUSTFLAGS")
+            self.assertEqual(first, self.environment.recipe_identity())
+            tool_version = "2"
+            self.assertNotEqual(first, self.environment.recipe_identity())
+
 
 if __name__ == "__main__":
     unittest.main()
