@@ -77,6 +77,11 @@ class LifecycleTest(unittest.TestCase):
             calls.clear()
             self.environment.prepare_dependencies()
             self.assertEqual(calls, ["test:e2e:deps"])
+            calls.clear()
+            (scratch / "apps/node_modules/.bin/ts-node").unlink()
+            (scratch / "sdks/node/node_modules/.bin/napi").unlink()
+            self.environment.prepare_dependencies()
+            self.assertEqual(calls, ["test:e2e:deps", "test:e2e:deps:apps", "test:e2e:deps:node"])
 
 
 if __name__ == "__main__":
