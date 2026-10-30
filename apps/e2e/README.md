@@ -61,9 +61,10 @@ runs pytest against a deployed API. Those CI workflows have not been migrated
 to the managed local lifecycle; shared case changes also affect their runs.
 
 Most changes are E2E scripts/cases, Make targets, development tools and docs.
-SDK public interfaces are unchanged. One production Runner change selects
-`systemd-run --user --scope` for non-root volume mounts on systemd hosts;
-root mounts retain system scopes. Host KVM/FUSE prerequisites still apply.
+SDK public interfaces are unchanged. Rootless volume mounts additionally need
+the companion Runner change that selects `systemd-run --user --scope` for
+non-root processes; this branch does not change product code. Host KVM/FUSE
+prerequisites still apply.
 
 This workflow does not freeze every dependency or establish production-deployment
 parity: the API runs from source through ts-node, and the standard environment
@@ -142,9 +143,10 @@ Managed volumes need `mount-s3`, `/dev/fuse` and `user_allow_other` in
 once in their system configuration. Daily E2E commands never escalate privileges.
 Missing volume prerequisites remain visible and must not be counted as coverage.
 
-The recorded rootless MinIO run reaches the guest mount but still fails writes
-with permission/I/O errors. The startup smoke proves guest exec and API/Runner
-logs; it does not assert volume persistence. See the
+With the companion Runner scope change, the recorded rootless MinIO run reaches
+the guest mount but still fails writes with permission/I/O errors. The startup
+smoke proves guest exec and API/Runner logs; it does not assert volume
+persistence. See the
 [measured results and remaining failures](../../docs/contributing/investigations/2026-10-29-e2e-standardization.md#execution-observations)
 before treating local startup as full-suite success.
 

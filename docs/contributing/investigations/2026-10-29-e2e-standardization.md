@@ -503,13 +503,19 @@ Four implementation defects found in review are fixed:
   Dex configuration recreates the container, and the PostgreSQL volume is
   removed because initdb reads `POSTGRES_PASSWORD` only once.
 - The E2E Python environment is isolated in `.venv-e2e`; `test:e2e:check`
-  runs with the devshell Python, and `test:e2e:report` exits nonzero on
-  incomplete evidence.
+  uses that environment when synced and the devshell Python otherwise, and
+  `test:e2e:report` exits nonzero on incomplete evidence. A new
+  `e2e-harness.yml` runs the checks on harness changes; it needs no KVM,
+  containers or network.
 
 The Runner `systemd-run --user` change moved to its own branch. The unsafe
 `two_sided.sh` helper and its make target were removed in favor of the
-separate-worktree method above.
+separate-worktree method above. `setup` and `up` now differ: `up` starts or
+recovers without repeating the guest smoke.
 
-Still unverified or unchanged: the CI workflows do not run this manager, the
-local stack has only been accepted on x86_64 NixOS, the recorded full-suite
-failures remain, and rootless volume writes still fail after the mount starts.
+After the changes, `make test:e2e:check` passes 14 library checks and 37
+lifecycle/reporting checks locally, and `make test:e2e:deps` syncs the pinned
+environment into `.venv-e2e`. Still unverified or unchanged: only the harness
+checks run in CI, the full managed stack has only been accepted on x86_64
+NixOS, the recorded full-suite failures remain, and rootless volume writes
+still fail after the mount starts (the companion Runner change).
