@@ -205,7 +205,9 @@ prints an error and exits `1`.
 marker and the fixed verdict suffix: `not found in $PATH` maps to `127`, and
 `does not have correct permissions` maps to `126`. Match the suffix, never
 substrings in the command name or path; those may contain either verdict.
-Other startup failures remain errors.
+The guest executor (`BOXLITE_EXECUTOR=guest`) classifies `Command::spawn`
+directly: `NotFound` is `127` and `PermissionDenied` is `126`, with the same
+wording. Other startup failures remain errors.
 
 **Example:**
 ```text

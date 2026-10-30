@@ -580,8 +580,6 @@ async fn spawn_with_executor(
     execution_id: &str,
     ssh_workload: Option<crate::service::ssh::SshWorkload>,
 ) -> Result<SpawnedExecution, ExecResponse> {
-    use executor::Executor;
-
     let executor_value = req.env.get(executor_const::ENV_VAR).map(|s| s.as_str());
 
     match executor_value {
@@ -594,10 +592,15 @@ async fn spawn_with_executor(
             }
             // Guest executor (explicit or default)
             debug!(execution_id = %execution_id, "Using GuestExecutor");
-            let handle = GuestExecutor
-                .spawn(req)
-                .await
-                .map_err(|e| spawn_error(execution_id, e.to_string()))?;
+            let handle = match GuestExecutor.spawn_attempt(req).await {
+                Ok(handle) => handle,
+                Err(crate::container::SpawnFailure::Rejected(rejection)) => {
+                    return Ok(SpawnedExecution::Rejected(rejection));
+                }
+                Err(crate::container::SpawnFailure::Failed(error)) => {
+                    return Err(spawn_error(execution_id, error.to_string()));
+                }
+            };
             Ok(SpawnedExecution::Process(handle, None))
         }
         Some(s) if s.starts_with(executor_const::CONTAINER_KEY) => {
@@ -778,8 +781,8 @@ fn is_single_path_component(id: &str) -> bool {
 #[cfg(test)]
 mod container_id_path_tests {
     use super::{
-        execution_id_for_request, is_single_path_component, revive_and_retry, GuestServer,
-        TtyResize,
+        execution_id_for_request, is_single_path_component, revive_and_retry, start_execution,
+        GuestServer, TtyResize,
     };
     use crate::layout::GuestLayout;
     use crate::reaper::ExitSlot;
@@ -870,6 +873,48 @@ mod container_id_path_tests {
         assert_eq!(
             execution_id_for_request(Some("ssh-id"), true).unwrap(),
             "ssh-id"
+        );
+    }
+
+    /// `BOXLITE_EXECUTOR=guest` runs the command directly in the guest. A
+    /// program that cannot be executed is the caller's POSIX outcome there
+    /// too, not a spawn fault, so it must publish like any exec result.
+    #[tokio::test]
+    async fn guest_executor_missing_program_is_a_completed_execution() {
+        use boxlite_shared::ExecRequest;
+        use std::collections::HashMap;
+
+        let server = GuestServer::new(GuestLayout::new());
+        let req = ExecRequest {
+            execution_id: None,
+            program: "pol55-missing-program".to_string(),
+            args: Vec::new(),
+            env: HashMap::from([("BOXLITE_EXECUTOR".to_string(), "guest".to_string())]),
+            workdir: String::new(),
+            timeout_ms: 0,
+            tty: None,
+            user: None,
+        };
+
+        let response = start_execution(&server, req, None).await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.pid, 0, "a rejected spawn reports no process");
+        let exit = server.wait_execution(&response.execution_id).await.unwrap();
+        assert_eq!(exit.exit_code, 127);
+        let mut output = server
+            .attach_execution(&response.execution_id)
+            .await
+            .unwrap();
+        let event = output.recv().await.unwrap().unwrap();
+        let diagnostic = match event.event.unwrap() {
+            exec_output::Event::Stderr(stderr) => String::from_utf8(stderr.data).unwrap(),
+            event => panic!("diagnostic must arrive on stderr: {event:?}"),
+        };
+        assert!(diagnostic.contains("pol55-missing-program"), "{diagnostic}");
+        assert!(
+            diagnostic.trim_end().ends_with("not found in $PATH"),
+            "{diagnostic}"
         );
     }
 

@@ -1,27 +1,14 @@
-//! Executor trait and implementations.
+//! Process spawning for the two executors.
 //!
-//! Provides abstraction for spawning processes in different contexts:
 //! - ContainerExecutor: runs commands inside OCI container
 //! - GuestExecutor: runs commands directly on guest
 
-use crate::container::{Container, SpawnFailure};
+use crate::container::{CommandRejection, Container, SpawnFailure};
 use crate::service::exec::exec_handle::{ExecHandle, PtyConfig};
-use async_trait::async_trait;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use boxlite_shared::ExecRequest;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-/// Executor spawns processes.
-#[allow(
-    clippy::double_must_use,
-    reason = "async_trait generates a must-use boxed future"
-)]
-#[async_trait]
-pub trait Executor: Send + Sync {
-    /// Spawn process from ExecRequest.
-    async fn spawn(&self, req: &ExecRequest) -> BoxliteResult<ExecHandle>;
-}
 
 /// Executes commands inside OCI container.
 pub struct ContainerExecutor {
@@ -119,21 +106,18 @@ impl ContainerExecutor {
     }
 }
 
-#[async_trait]
-impl Executor for ContainerExecutor {
-    async fn spawn(&self, req: &ExecRequest) -> BoxliteResult<ExecHandle> {
-        self.spawn_request(req, None)
-            .await
-            .map_err(SpawnFailure::into_boxlite)
-    }
-}
-
 /// Executes commands directly on guest (no container).
 pub struct GuestExecutor;
 
-#[async_trait]
-impl Executor for GuestExecutor {
-    async fn spawn(&self, req: &ExecRequest) -> BoxliteResult<ExecHandle> {
+impl GuestExecutor {
+    /// Spawn directly in the guest.
+    ///
+    /// A program that cannot be started is [`SpawnFailure::Rejected`], the
+    /// same POSIX outcome the container executor reports.
+    pub(crate) async fn spawn_attempt(
+        &self,
+        req: &ExecRequest,
+    ) -> Result<ExecHandle, SpawnFailure> {
         if let Some(tty) = &req.tty {
             let config = PtyConfig::try_from(tty)?;
             spawn_with_pty(req, config)
@@ -143,8 +127,30 @@ impl Executor for GuestExecutor {
     }
 }
 
+/// `execve`'s refusal is a verdict about the caller's program: missing and
+/// non-executable files are results, not guest faults. The wording matches
+/// the container executor so every exec caller sees one message shape.
+fn spawn_failure(program: &str, error: std::io::Error) -> SpawnFailure {
+    let rejection = match error.kind() {
+        std::io::ErrorKind::NotFound => CommandRejection {
+            message: format!("executable '{program}' not found in $PATH"),
+            exit_code: 127,
+        },
+        std::io::ErrorKind::PermissionDenied => CommandRejection {
+            message: format!("executable '{program}' does not have correct permissions"),
+            exit_code: 126,
+        },
+        _ => {
+            return SpawnFailure::Failed(BoxliteError::Internal(format!(
+                "Failed to spawn '{program}': {error}"
+            )));
+        }
+    };
+    SpawnFailure::Rejected(rejection)
+}
+
 /// Spawn process with pipes (standard mode).
-fn spawn_with_pipes(req: &ExecRequest) -> BoxliteResult<ExecHandle> {
+fn spawn_with_pipes(req: &ExecRequest) -> Result<ExecHandle, SpawnFailure> {
     use nix::unistd::Pid;
     use std::os::unix::io::{FromRawFd, IntoRawFd};
     use std::process::Command;
@@ -178,7 +184,7 @@ fn spawn_with_pipes(req: &ExecRequest) -> BoxliteResult<ExecHandle> {
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| BoxliteError::Internal(format!("Failed to spawn '{}': {}", req.program, e)))?;
+        .map_err(|error| spawn_failure(&req.program, error))?;
 
     let pid = child.id();
 
@@ -192,13 +198,13 @@ fn spawn_with_pipes(req: &ExecRequest) -> BoxliteResult<ExecHandle> {
         Ok(handle) => Ok(handle),
         Err(error) => {
             terminate_child(&mut child);
-            Err(error)
+            Err(error.into())
         }
     }
 }
 
 /// Spawn process with PTY (interactive mode).
-fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> BoxliteResult<ExecHandle> {
+fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> Result<ExecHandle, SpawnFailure> {
     use nix::pty::{openpty, OpenptyResult, Winsize};
     use nix::unistd::{dup, Pid};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -265,7 +271,7 @@ fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> BoxliteResult<ExecHan
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| BoxliteError::Internal(format!("Failed to spawn '{}': {}", req.program, e)))?;
+        .map_err(|error| spawn_failure(&req.program, error))?;
 
     let pid = child.id();
 
@@ -281,18 +287,18 @@ fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> BoxliteResult<ExecHan
         Ok(fd) => fd,
         Err(error) => {
             terminate_child(&mut child);
-            return Err(BoxliteError::Internal(format!(
-                "Failed to dup PTY for stdin: {error}"
-            )));
+            return Err(
+                BoxliteError::Internal(format!("Failed to dup PTY for stdin: {error}")).into(),
+            );
         }
     };
     let stdout_fd = match dup(master.as_raw_fd()) {
         Ok(fd) => fd,
         Err(error) => {
             terminate_child(&mut child);
-            return Err(BoxliteError::Internal(format!(
-                "Failed to dup PTY for stdout: {error}"
-            )));
+            return Err(
+                BoxliteError::Internal(format!("Failed to dup PTY for stdout: {error}")).into(),
+            );
         }
     };
 
@@ -304,7 +310,7 @@ fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> BoxliteResult<ExecHan
         Ok(handle) => handle,
         Err(error) => {
             terminate_child(&mut child);
-            return Err(error);
+            return Err(error.into());
         }
     };
 
@@ -328,6 +334,66 @@ fn terminate_child(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(program: &str) -> boxlite_shared::ExecRequest {
+        boxlite_shared::ExecRequest {
+            execution_id: None,
+            program: program.to_string(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            workdir: String::new(),
+            timeout_ms: 0,
+            tty: None,
+            user: None,
+        }
+    }
+
+    fn rejection(result: Result<ExecHandle, SpawnFailure>) -> CommandRejection {
+        match result {
+            Err(SpawnFailure::Rejected(rejection)) => rejection,
+            Err(SpawnFailure::Failed(error)) => {
+                panic!("the command must be rejected, not faulty: {error}")
+            }
+            Ok(_) => panic!("the command must be rejected, not run"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_program_is_rejected_with_127() {
+        let rejection = rejection(
+            GuestExecutor
+                .spawn_attempt(&request("/pol55/no-such-program"))
+                .await,
+        );
+
+        assert_eq!(rejection.exit_code, 127);
+        assert_eq!(
+            rejection.message,
+            "executable '/pol55/no-such-program' not found in $PATH"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_executable_program_is_rejected_with_126() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("not-executable");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+
+        let rejection = rejection(
+            GuestExecutor
+                .spawn_attempt(&request(program.to_str().unwrap()))
+                .await,
+        );
+
+        assert_eq!(rejection.exit_code, 126);
+        assert!(
+            rejection
+                .message
+                .ends_with("does not have correct permissions"),
+            "{}",
+            rejection.message
+        );
+    }
 
     #[test]
     fn terminate_child_kills_and_reaps_process() {
