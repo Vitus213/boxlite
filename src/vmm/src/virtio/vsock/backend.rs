@@ -13,7 +13,10 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     ops::Range,
-    os::unix::net::UnixListener,
+    os::{
+        fd::AsRawFd,
+        unix::net::{UnixListener, UnixStream},
+    },
     path::PathBuf,
     sync::Arc,
 };
@@ -29,6 +32,14 @@ const FIRST_HOST_PORT: u32 = 1 << 30;
 pub(super) struct Mappings {
     pub listeners: Vec<(u32, UnixListener)>,
     pub connects: HashMap<u32, PathBuf>,
+    pub control: Option<crate::VsockControl>,
+}
+
+/// The polling duplicate must close before transferring or closing the stream.
+struct Pending {
+    registration: Registration,
+    socket: UnixStream,
+    key: Key,
 }
 
 pub(super) struct Backend {
@@ -38,6 +49,7 @@ pub(super) struct Backend {
     registrar: Arc<dyn EventRegistrar>,
     cid: u64,
     connections: VecDeque<(Key, Connection)>,
+    pending: VecDeque<Pending>,
     ports: Range<u32>,
     next_listener: usize,
     listener_retry: bool,
@@ -61,6 +73,7 @@ impl Backend {
             registrar,
             cid,
             connections: VecDeque::new(),
+            pending: VecDeque::new(),
             ports: FIRST_HOST_PORT..u32::MAX,
             next_listener: 0,
             listener_retry: false,
@@ -91,7 +104,7 @@ impl Backend {
             && h.len == 0
             && h.flags == 0
             && self.connection(key).is_none()
-            && self.connections.len() < MAX_CONNECTIONS
+            && self.connections.len() + self.pending.len() < MAX_CONNECTIONS
             && let Some(socket) = self
                 .mappings
                 .connects
@@ -148,7 +161,8 @@ impl Backend {
             let Some((guest, listener)) = self.mappings.listeners.get(self.next_listener) else {
                 break;
             };
-            if self.connections.len() >= MAX_CONNECTIONS || !self.can_receive() {
+            if self.connections.len() + self.pending.len() >= MAX_CONNECTIONS || !self.can_receive()
+            {
                 break;
             }
             self.next_listener += 1;
@@ -167,16 +181,25 @@ impl Backend {
                         guest: *guest,
                         host,
                     };
-                    let connection = Connection::new(
-                        socket,
-                        self.registrar.clone(),
-                        State::AwaitResponse,
-                        key,
-                        self.cid,
-                    )?;
-                    self.outgoing
-                        .push_back(connection.packet(REQUEST, 0, vec![]));
-                    self.connections.push_back((key, connection));
+                    if self
+                        .mappings
+                        .control
+                        .as_ref()
+                        .is_some_and(|control| control.port == *guest)
+                    {
+                        let registration = Registration::stream(
+                            &socket,
+                            self.registrar.clone(),
+                            Interest::READABLE,
+                        )?;
+                        self.pending.push_back(Pending {
+                            registration,
+                            socket,
+                            key,
+                        });
+                    } else {
+                        self.accept_guest(socket, key)?;
+                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -190,8 +213,52 @@ impl Backend {
             // An early accept may need another try after a later chunk was empty.
             std::mem::take(&mut self.listener_retry)
         } else {
-            self.connections.len() < MAX_CONNECTIONS && self.can_receive()
+            self.connections.len() + self.pending.len() < MAX_CONNECTIONS && self.can_receive()
         };
+        for _ in 0..self.pending.len() {
+            if !self.can_receive() {
+                break;
+            }
+            let pending = self.pending.pop_front().unwrap();
+            let mut prefix = 0u8;
+            // Peek only: the protocol owner must receive the complete preface.
+            // Control clients wait for its ACK before sending SCM_RIGHTS.
+            // SAFETY: socket owns a live fd and prefix is writable for one byte.
+            let count = unsafe {
+                libc::recv(
+                    pending.socket.as_raw_fd(),
+                    (&mut prefix as *mut u8).cast(),
+                    1,
+                    libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                )
+            };
+            if count < 0 {
+                let error = io::Error::last_os_error();
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) {
+                    again |= error.kind() == io::ErrorKind::Interrupted;
+                    self.pending.push_back(pending);
+                    continue;
+                }
+            }
+            let Pending {
+                registration,
+                socket,
+                key,
+            } = pending;
+            drop(registration);
+            let control = self.mappings.control.as_ref().unwrap();
+            if count == 1 && prefix == control.guest_prefix {
+                self.accept_guest(socket, key)?;
+            } else if count == 1 && prefix == control.control_prefix {
+                // Full/disconnected receivers close only this stream; never stall the worker.
+                let _ = control.connections.try_send(socket);
+            }
+            // Closing or transferring a pending socket frees capacity for another accept.
+            again = true;
+        }
         for _ in 0..self.connections.len() {
             // A connection emits at most one write update and one read/control packet.
             if self.outgoing.len() + 2 > MAX_PENDING {
@@ -212,6 +279,20 @@ impl Backend {
             }
         }
         Ok(again)
+    }
+
+    fn accept_guest(&mut self, socket: UnixStream, key: Key) -> Result<(), DeviceError> {
+        let connection = Connection::new(
+            socket,
+            self.registrar.clone(),
+            State::AwaitResponse,
+            key,
+            self.cid,
+        )?;
+        self.outgoing
+            .push_back(connection.packet(REQUEST, 0, vec![]));
+        self.connections.push_back((key, connection));
+        Ok(())
     }
 
     fn connection(&mut self, key: Key) -> Option<&mut Connection> {

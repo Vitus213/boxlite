@@ -75,6 +75,8 @@ pub use chipset::{BusKind, Conflict};
 pub use config::{
     DiskConfig, DiskFormat, FsConfig, FsShareConfig, NetConfig, VmConfig, VsockConfig,
 };
+#[cfg(unix)]
+pub use config::VsockControl;
 pub use error::{Error, Result};
 pub use memory::ReclaimPolicy;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

@@ -83,7 +83,19 @@ impl Drop for BoundPath {
 }
 
 impl Vsock {
-    pub(crate) fn bind(config: &crate::config::VsockConfig) -> io::Result<Self> {
+    pub(crate) fn bind(
+        config: &crate::config::VsockConfig,
+        control: Option<crate::VsockControl>,
+    ) -> io::Result<Self> {
+        if let Some(control) = &control
+            && (control.guest_prefix == control.control_prefix
+                || !config.listen.iter().any(|(port, _)| *port == control.port))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "vsock control requires distinct prefixes and a matching listener",
+            ));
+        }
         let mut paths = Vec::new();
         let mut mappings = Vec::new();
         for (port, path) in &config.listen {
@@ -109,6 +121,7 @@ impl Vsock {
                 }),
         );
         let mut device = Self::new(config.cid, mappings)?;
+        Arc::get_mut(&mut device.mappings).unwrap().control = control;
         device.paths = paths;
         Ok(device)
     }

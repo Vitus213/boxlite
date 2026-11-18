@@ -105,7 +105,13 @@ impl Vm<boxlite_hypervisor::KvmVm> {
     /// stalls the guest.
     /// `control` dispatches matching host connections before guest forwarding;
     /// its receiver validates the control protocol and owns descriptor transfers.
-    pub fn new(config: VmConfig, console: Box<dyn std::io::Write + Send>) -> Result<Self> {
+    /// `control` dispatches matching host connections before guest forwarding;
+    /// its receiver validates the control protocol and owns descriptor transfers.
+    pub fn new(
+        config: VmConfig,
+        console: Box<dyn std::io::Write + Send>,
+        control: Option<crate::VsockControl>,
+    ) -> Result<Self> {
         use crate::devices::console::DEFAULT_QUEUE_BYTES;
 
         config.validate()?;
@@ -115,7 +121,7 @@ impl Vm<boxlite_hypervisor::KvmVm> {
             config,
             boxlite_hypervisor::KvmVm::new,
             |ram, config| crate::boot::prepare(ram, config).map(|setup| setup.boot_regs),
-            |chipset, ctx, config| crate::devices::add_all(chipset, ctx, config, writer),
+            |chipset, ctx, config| crate::devices::add_all(chipset, ctx, config, writer, control),
         )?;
         vm.console = Mutex::new(Some(worker));
         Ok(vm)

@@ -47,7 +47,28 @@ impl VmmInstanceImpl for NativeVmmInstance {
             })?),
             None => Box::new(io::sink()),
         };
-        let mut vm = Vm::new(self.config, sink).map_err(map_vmm_error)?;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let control = {
+            let (connections, receiver) = std::sync::mpsc::sync_channel(128);
+            std::thread::Builder::new()
+                .name("mount-control".into())
+                .spawn(move || {
+                    crate::vmm::controller::mount_control::serve(
+                        receiver,
+                        boxlite_shared::constants::mount_tags::AGGREGATE.into(),
+                    );
+                })
+                .map_err(|error| BoxliteError::Engine(format!("spawn mount-control: {error}")))?;
+            Some(boxlite_vmm::VsockControl {
+                port: boxlite_shared::constants::network::GUEST_AGENT_PORT,
+                guest_prefix: b'P',
+                control_prefix: boxlite_shared::constants::mount_tags::MOUNT_CONTROL_PREFACE[0],
+                connections,
+            })
+        };
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        let control = None;
+        let mut vm = Vm::new(self.config, sink, control).map_err(map_vmm_error)?;
         let exit = vm.run().map_err(map_vmm_error)?;
         tracing::info!(?exit, "native VM ended");
         Ok(())
