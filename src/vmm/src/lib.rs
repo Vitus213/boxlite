@@ -72,6 +72,8 @@ mod virtio;
 mod vm;
 
 pub use chipset::{BusKind, Conflict};
+#[cfg(unix)]
+pub use config::VsockControl;
 pub use config::{
     DiskConfig, DiskFormat, FsConfig, FsShareConfig, NetConfig, VmConfig, VsockConfig,
 };
