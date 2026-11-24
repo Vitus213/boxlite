@@ -37,7 +37,7 @@ fn record_cost(mount: &ControlMount) -> io::Result<usize> {
     Ok(counter.0 + 1)
 }
 
-fn normalize_target(target: &str) -> io::Result<String> {
+pub(crate) fn normalize_target(target: &str) -> io::Result<String> {
     if target.len() > MAX_PATH_BYTES || target.contains('\0') || !target.starts_with('/') {
         return Err(errno(libc::EINVAL));
     }

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod registry;
-pub(crate) use registry::Registry;
+pub(crate) use registry::{Registry, normalize_target};
 
 // Include time queued behind an online disk resize in the exchange budget.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
