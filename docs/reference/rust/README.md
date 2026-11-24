@@ -387,6 +387,7 @@ HTTP contract, reconfiguration, disable, and generation semantics.
 | `metrics` | `async fn metrics(&self) -> BoxliteResult<BoxMetrics>` | Get box metrics |
 | `stop` | `async fn stop(&self) -> BoxliteResult<()>` | Stop the box |
 | `executions` | `fn executions(&self) -> ExecutionsHandle` | Live session inventory and control recovery; never boots a box |
+| `mounts` | `fn mounts(&self) -> MountsHandle` | Runtime directory mounts of a running native box; never boots a box |
 | `attach` | `async fn attach(&self, options: AttachOptions) -> BoxliteResult<Execution>` | Attach to init or a named live session; only one output reader is allowed |
 
 #### ExecutionsHandle
@@ -417,6 +418,56 @@ owns output.
 To recover streams after a client process exits, call
 `attach(AttachOptions::execution(id))`; an existing reader is reported as a
 conflict rather than silently returning no output.
+
+#### MountsHandle
+
+`LiteBox::mounts()` returns an owned, cloneable `MountsHandle` without starting
+the box. Runtime mounts are a release candidate: they need the `native-vmm`
+experimental opt-in and a running Linux x86_64 native box.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `add` | `async fn add(&self, request: MountRequest) -> BoxliteResult<MountInfo>` | Deliver a host directory into the running container |
+| `remove` | `async fn remove(&self, target: impl AsRef<Path>) -> BoxliteResult<()>` | Lazily remove the mount at a container path |
+| `list` | `async fn list(&self) -> BoxliteResult<Vec<MountInfo>>` | Every mount of the current VM run |
+| `get` | `async fn get(&self, target: impl AsRef<Path>) -> BoxliteResult<Option<MountInfo>>` | The mount at a container path |
+
+A `MountRequest` names an absolute host directory, a target path below `/` and
+a `read_only` flag. `add` returns once the guest confirmed the mount, so the
+container can use the target at once. The target must be missing or empty, and
+one reached through a symbolic link is refused. A target that already has a
+mount is an invalid-state error.
+
+`remove` is lazy: the target stops serving the directory immediately, while
+descriptors opened before keep working. It returns after the guest confirmed
+the detach and reports `NotFound` when nothing is mounted there. The same
+target accepts a new mount right away, with its own identity.
+
+`MountInfo.state` is `Mounted` once confirmed, `Preparing` while an add is in
+flight and `Detaching` while a removal waits for the guest. A failed or timed-out
+step never leaves an untracked mount: the runtime detaches the mount by its
+identity before reporting the error, and keeps a record it could not confirm so
+that a repeated `remove` finishes it.
+
+Queries never start the box: on a box without a running VM, `list` is empty and
+`get` is `None`. On a running box, `add` and `remove` wait for the container's
+start to finish, as `exec` does. Records belong to one VM run and do not survive
+a stop.
+
+#### Example
+
+```rust
+let mounts = box.mounts();
+let info = mounts
+    .add(MountRequest {
+        source: "/srv/project".into(),
+        target: "/workspace".into(),
+        read_only: false,
+    })
+    .await?;
+assert_eq!(info.state, MountState::Mounted);
+mounts.remove("/workspace").await?;
+```
 
 #### Lifecycle
 
